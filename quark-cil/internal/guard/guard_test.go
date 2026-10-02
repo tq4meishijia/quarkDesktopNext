@@ -1,7 +1,20 @@
+// ---------------------------------------------------------------------------
+// 修改声明（AGPL-3.0 第 13 条要求）
+// 本文件源自上游项目 kuake_cli（https://github.com/zhangjingwei/kuake_cli，
+// AGPL-3.0）。本仓库已对其作出修改，修改日期 2026-10-02：
+//   TestCheckUploadLocalPath_SystemPaths 与
+//   TestCheckUploadLocalPath_SymlinkEscape 原先硬编码 POSIX 路径，在 Windows
+//   上必然失败；现改为按 GOOS 选择对应的系统路径用例，使防护规则在两个平台
+//   上都得到真实断言。POSIX 用例内容保持不变。
+// 修改说明另见仓库根目录 NOTICE 文件。
+// ---------------------------------------------------------------------------
+
 package guard
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -145,9 +158,29 @@ func TestCheckRemoteFileName(t *testing.T) {
 	}
 }
 
-func TestCheckUploadLocalPath_SystemPaths(t *testing.T) {
-	g := NewGuard()
-	cases := []string{
+// systemPathCases returns the OS-appropriate set of protected system paths.
+// The upstream list was POSIX-only, which made this test fail on Windows —
+// not because the guard was wrong, but because those paths simply are not
+// system locations there. Windows now gets its own equivalents.
+func systemPathCases() []string {
+	if runtime.GOOS == "windows" {
+		root := os.Getenv("SystemRoot")
+		if root == "" {
+			root = `C:\Windows`
+		}
+		return []string{
+			filepath.Join(root, "System32", "config", "SAM"),
+			filepath.Join(root, "System32", "config", "SYSTEM"),
+			filepath.Join(root, "win.ini"),
+			`C:\ProgramData\Vendor\app.cfg`,
+			`C:\System Volume Information\index.dat`,
+			`C:\Users\Default\NTUSER.DAT`,
+			`C:\$Recycle.Bin\S-1-5-21\file.txt`,
+			`C:\pagefile.sys`,
+			`C:\`,
+		}
+	}
+	return []string{
 		"/etc/passwd",
 		"/etc/shadow",
 		"/var/log/auth.log",
@@ -159,7 +192,11 @@ func TestCheckUploadLocalPath_SystemPaths(t *testing.T) {
 		"/root/.bashrc",
 		"/private/etc/master.passwd",
 	}
-	for _, p := range cases {
+}
+
+func TestCheckUploadLocalPath_SystemPaths(t *testing.T) {
+	g := NewGuard()
+	for _, p := range systemPathCases() {
 		if err := g.CheckUploadLocalPath(p); err == nil {
 			t.Errorf("CheckUploadLocalPath(%q): expected error", p)
 		}
@@ -234,15 +271,25 @@ func TestCheckUploadLocalPath_NormalFilesAllowed(t *testing.T) {
 }
 
 func TestCheckUploadLocalPath_SymlinkEscape(t *testing.T) {
-	// A symlink that points at /etc must be rejected even when the user-supplied
-	// path looks innocent — EvalSymlinks should resolve to /etc.
+	// A symlink that points at a protected system location must be rejected
+	// even when the user-supplied path looks innocent — EvalSymlinks should
+	// resolve it. The target is OS-specific: /etc/passwd on POSIX, a real
+	// file under %SystemRoot% on Windows.
+	target := "/etc/passwd"
+	if runtime.GOOS == "windows" {
+		root := os.Getenv("SystemRoot")
+		if root == "" {
+			root = `C:\Windows`
+		}
+		target = filepath.Join(root, "win.ini")
+	}
 	tmp := t.TempDir()
 	link := tmp + "/innocent.txt"
-	if err := os.Symlink("/etc/passwd", link); err != nil {
+	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink not supported on this platform: %v", err)
 	}
 	g := NewGuard()
 	if err := g.CheckUploadLocalPath(link); err == nil {
-		t.Errorf("CheckUploadLocalPath(%q): expected error (symlink to /etc)", link)
+		t.Errorf("CheckUploadLocalPath(%q): expected error (symlink to %s)", link, target)
 	}
 }

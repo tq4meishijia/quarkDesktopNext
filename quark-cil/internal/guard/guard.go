@@ -1,3 +1,13 @@
+// ---------------------------------------------------------------------------
+// 修改声明（AGPL-3.0 第 13 条要求）
+// 本文件源自上游项目 kuake_cli（https://github.com/zhangjingwei/kuake_cli，
+// AGPL-3.0）。本仓库已对其作出修改，修改日期 2026-10-02：
+//   新增 Windows 平台系统路径防护（uploadDenyPrefixesWindows、
+//   windowsRootDenyBasenames、isWindowsSystemPath 及其在
+//   CheckUploadLocalPath 中的调用）。原 POSIX 拦截规则保持不变。
+// 修改说明另见仓库根目录 NOTICE 文件。
+// ---------------------------------------------------------------------------
+
 package guard
 
 import (
@@ -5,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -152,6 +163,65 @@ var uploadDenyPrefixes = []string{
 	"/private/var/root/",
 }
 
+// uploadDenyPrefixesWindows lists drive-letter-relative prefixes — i.e. the
+// part after "C:" — that uploads must not originate from on Windows. Drive
+// letters differ between hosts, so matching is done after stripping the
+// leading "<x>:", and comparison is case-insensitive.
+//
+// Scope mirrors the POSIX list above: operating-system and per-machine state
+// locations. Ordinary user data lives under /Users/<name>/ and is NOT blocked,
+// so false positives on legitimate files stay unlikely.
+var uploadDenyPrefixesWindows = []string{
+	"/windows/",
+	"/windows.old/",
+	"/programdata/",
+	"/system volume information/",
+	"/recovery/",
+	"/$recycle.bin/",
+	"/users/default/",
+	"/users/all users/",
+	"/documents and settings/",
+}
+
+// windowsRootDenyBasenames are files that only exist at the root of a Windows
+// system volume and carry system or memory state (page file, hibernation
+// image, boot configuration).
+var windowsRootDenyBasenames = map[string]bool{
+	"pagefile.sys": true,
+	"hiberfil.sys": true,
+	"swapfile.sys": true,
+	"bootmgr":      true,
+	"bootnxt":      true,
+	"bcd":          true,
+	"bootsect.bak": true,
+}
+
+// isWindowsSystemPath reports whether match — an absolute, slash-separated
+// Windows path such as "C:/Windows/System32/config/SAM" — points at a
+// protected Windows system location.
+func isWindowsSystemPath(match string) bool {
+	if len(match) < 2 || match[1] != ':' {
+		// Not a drive-letter path (e.g. UNC "//server/share"); leave alone.
+		return false
+	}
+	rest := strings.ToLower(strings.TrimPrefix(match[2:], "/"))
+	for _, prefix := range uploadDenyPrefixesWindows {
+		p := strings.TrimPrefix(prefix, "/")
+		if rest == strings.TrimSuffix(p, "/") || strings.HasPrefix(rest, p) {
+			return true
+		}
+	}
+	// Bare drive root, e.g. "C:/".
+	if rest == "" {
+		return true
+	}
+	// Root-level system files, e.g. "C:/pagefile.sys".
+	if !strings.Contains(rest, "/") && windowsRootDenyBasenames[rest] {
+		return true
+	}
+	return false
+}
+
 // uploadDenySegments are path segments that, when present anywhere in the
 // resolved absolute path, indicate the file lives inside a credential or
 // secret-management directory.
@@ -206,6 +276,11 @@ func (g *Guard) CheckUploadLocalPath(localPath string) error {
 		if matchPath == strings.TrimSuffix(prefix, "/") || strings.HasPrefix(matchPath, prefix) {
 			return fmt.Errorf("local_path %q points at a protected system path", localPath)
 		}
+	}
+	// Windows: the POSIX prefixes above can never match a "C:/..." path, so
+	// without this branch the system-path rule silently does nothing there.
+	if runtime.GOOS == "windows" && isWindowsSystemPath(matchPath) {
+		return fmt.Errorf("local_path %q points at a protected Windows system path", localPath)
 	}
 	for _, seg := range uploadDenySegments {
 		if strings.Contains(matchPath, seg) {

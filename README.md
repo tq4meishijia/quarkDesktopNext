@@ -384,7 +384,12 @@ export KUAKE_PUUS='yyy'
 | 范围 | 许可证 | 说明 |
 | --- | --- | --- |
 | 仓库根目录（桌面端自有代码：`main.go`、`app/`、`internal/`、`frontend/`、`scripts/`） | **MIT** | 见 [LICENSE](LICENSE)，Copyright (c) 2026 tq4meishijia |
-| `quark-cil/`（上游 [kuake_cli](https://github.com/zhangjingwei/kuake_cli) 源码，原样引入、未作修改） | **AGPL-3.0** | 见 [quark-cil/LICENSE](quark-cil/LICENSE)，版权归上游作者所有 |
+| `quark-cil/`（上游 [kuake_cli](https://github.com/zhangjingwei/kuake_cli) 源码，随仓库分发） | **AGPL-3.0** | 见 [quark-cil/LICENSE](quark-cil/LICENSE)，版权归上游作者所有 |
+
+> **关于上游代码的修改**：本仓库对 `quark-cil/internal/guard/` 的 2 个文件作出了
+> 修改（补齐 Windows 平台系统路径防护；上游原清单仅覆盖 POSIX 前缀，在 Windows
+> 上实际失效）。依据 AGPL-3.0 第 13 条，修改已在两个文件顶部标注修改日期与内容，
+> 并在 [NOTICE](NOTICE) 中完整披露。除该文件外，`quark-cil/` 其余内容保持上游原样。
 
 **兼容性说明（重要）**：MIT 属宽松许可证，单向兼容于 AGPL-3.0——MIT 代码可被并入
 AGPL 作品，但**不能**将包含 AGPL-3.0 代码的衍生作品整体以 MIT 授权分发。因此：

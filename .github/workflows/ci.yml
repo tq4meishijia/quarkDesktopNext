@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, release]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, release]
   workflow_dispatch:
 
 permissions:
@@ -95,18 +95,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # 说明：上游 internal/guard 中 TestCheckUploadLocalPath_SystemPaths 与
-      # TestCheckUploadLocalPath_SymlinkEscape 两个用例依赖 POSIX 路径语义
-      # （/etc/*、/proc/* 与符号链接逃逸检测），在 Windows 上必然失败，
-      # 属运行环境差异而非回归。仅在 Windows 上跳过这两个用例，其余照常执行。
+      # 原先上游 guard 的两个用例硬编码 POSIX 路径，在 Windows 上必然失败，
+      # 曾以 go test -skip 规避；现已修复为按 GOOS 选取对应平台的系统路径用例
+      # （见 quark-cil/internal/guard），因此不再需要任何 skip。
       - name: Test
-        shell: bash
-        run: |
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            go test -skip '^TestCheckUploadLocalPath_(SystemPaths|SymlinkEscape)$' ./...
-          else
-            go test ./...
-          fi
+        run: go test ./...
 
   # ---------------------------------------------------------------------------
   # 汇总：便于在分支保护中只配置一个必需检查

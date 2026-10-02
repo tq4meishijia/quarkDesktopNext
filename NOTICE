@@ -16,14 +16,27 @@ Copyright (c) 2026 tq4meishijia
    - 版权：(c) 2026 tq4meishijia
    - 许可证：MIT（见根目录 LICENSE）
 
-2. quark-cil/ 子目录（上游项目，未作修改）
+2. quark-cil/ 子目录（上游项目，含本仓库作出的修改）
    - 上游仓库：https://github.com/zhangjingwei/kuake_cli
    - 版权：归上游作者 zhangjingwei 所有
    - 许可证：GNU Affero General Public License v3.0（AGPL-3.0）
              许可证全文见 quark-cil/LICENSE
-   - 说明：本目录为上游源码原样随仓库分发，仅用于满足 go.mod 中的
+   - 说明：本目录为上游源码随仓库分发，用于满足 go.mod 中的
            `replace github.com/zhangjingwei/kuake_cli => ./quark-cil`
            请保留其内部的版权与许可证声明，不要剥离。
+
+   **已作出的修改（依 AGPL-3.0 第 13 条「Remote Network Interaction;
+   Use with the GNU General Public License」之修改标注要求披露）：**
+
+   | 修改文件 | 修改日期 | 修改内容 |
+   | -------- | -------- | -------- |
+   | `quark-cil/internal/guard/guard.go` | 2026-10-02 | 新增 Windows 平台系统路径防护：`uploadDenyPrefixesWindows`、`windowsRootDenyBasenames`、`isWindowsSystemPath()` 及在 `CheckUploadLocalPath()` 中的调用。原有 POSIX 拦截规则未改动。 |
+   | `quark-cil/internal/guard/guard_test.go` | 2026-10-02 | `TestCheckUploadLocalPath_SystemPaths` 与 `TestCheckUploadLocalPath_SymlinkEscape` 原先硬编码 POSIX 路径、在 Windows 上必然失败；改为按 `runtime.GOOS` 选取对应平台的系统路径用例，POSIX 用例内容保持不变。 |
+
+   修改动机：上游的系统路径拦截清单仅覆盖 POSIX 前缀（`/etc/`、`/proc/` 等），
+   这些前缀在 Windows 上永远无法匹配 `C:/...` 形式的路径，导致 Windows 上该
+   规则实际失效。本修改补齐 Windows 侧的对等防护，属安全能力补齐，未放宽任何
+   既有拦截规则。两个受影响文件顶部均已添加修改声明。
 
 
 二、许可证兼容性结论（重要）
