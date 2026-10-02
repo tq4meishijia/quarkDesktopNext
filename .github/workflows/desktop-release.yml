@@ -166,7 +166,13 @@ jobs:
           ls -la build/bin/
 
       # ---------------------------------------------------------------
-      # 产物整理 + 校验和（跨平台用 python 生成 SHA-256）
+      # 产物整理 + 校验和
+      #
+      # 两个平台差异（实测踩坑，勿轻易简化）：
+      #   * Windows：wails 按 -o 的字面名字输出，不会自动补 .exe；
+      #   * macOS：wails 忽略 -o 的文件名，产出的是 <outputfilename>.app 包目录，
+      #     可执行文件在包内 Contents/MacOS/ 下，因此需要打包成 zip 再分发。
+      # Linux 单文件产出与 -o 一致。
       # ---------------------------------------------------------------
       - name: 整理产物与校验和
         id: package
@@ -175,26 +181,43 @@ jobs:
         run: |
           set -euo pipefail
           NAME="${{ steps.compile.outputs.name }}"
-          EXT=""
-          [ "${{ matrix.goos }}" = "windows" ] && EXT=".exe"
-          SRC="build/bin/${NAME}${EXT}"
           mkdir -p dist
-          if [ ! -f "$SRC" ]; then
-            echo "::error::未找到构建产物 $SRC"; exit 1
+
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            APP="$(find build/bin -maxdepth 1 -name '*.app' -print -quit)"
+            if [ -z "$APP" ]; then
+              echo "::error::未在 build/bin 下找到 .app 包"; exit 1
+            fi
+            ASSET="${NAME}.app.zip"
+            zip -qry "dist/${ASSET}" "$APP" -x '*.DS_Store'
+          else
+            SRC="build/bin/${NAME}"
+            if [ ! -f "$SRC" ]; then
+              # 兜底：取 build/bin 下最新的普通文件，避免因命名差异再次失败
+              SRC="$(find build/bin -maxdepth 1 -type f -print -quit)"
+            fi
+            if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
+              echo "::error::未在 build/bin 下找到构建产物"; exit 1
+            fi
+            EXT=""
+            if [ "${{ matrix.goos }}" = "windows" ]; then
+              EXT=".exe"
+            fi
+            ASSET="${NAME}${EXT}"
+            cp "$SRC" "dist/${ASSET}"
+            chmod +x "dist/${ASSET}" 2>/dev/null || true
           fi
-          cp "$SRC" "dist/${NAME}${EXT}"
-          chmod +x "dist/${NAME}${EXT}" 2>/dev/null || true
-          python3 - "$NAME" "$EXT" <<'PY'
+
+          python3 - "$ASSET" <<'PY'
           import hashlib, os, sys
-          name, ext = sys.argv[1], sys.argv[2]
-          asset = f"{name}{ext}"
+          asset = sys.argv[1]
           path = os.path.join("dist", asset)
           digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
           with open(path + ".sha256", "w", encoding="utf-8", newline="\n") as fh:
               fh.write(f"{digest}  {asset}\n")
           print(f"{asset}: {digest}")
           PY
-          echo "::notice::${{ matrix.label }} 产物就绪"
+          echo "::notice::${{ matrix.label }} 产物就绪：$ASSET"
 
       - name: 上传构建产物
         if: steps.preflight.outputs.skip != 'true' && steps.compile.outcome == 'success'
@@ -251,9 +274,14 @@ jobs:
 
             基于 [kuake_cli](https://github.com/zhangjingwei/kuake_cli) 的夸克网盘桌面客户端。
 
-            - 请以 `.sha256` 文件核对对应平台的校验和后再运行
-            - Linux / macOS 产物下载后需要执行 `chmod +x` 赋予可执行权限
-            - Windows/arm64 与 macOS/amd64 为实验性组合，本次未产出时会缺席
+            产物说明：
+            - Windows：`*windows-amd64.exe`，双击即可运行
+            - Linux：`*linux-*`，下载后需 `chmod +x` 赋予可执行权限
+            - macOS：`*darwin-*.app.zip`，解压后得到 `.app` 包，拖入「应用程序」即可
+            - 每个产物都有同名 `.sha256`，运行前请先核对校验和
+            - macOS/amd64 与 Windows/arm64 为实验性组合，Runner 不支持时本次不会产出对应文件
+
+            本项目为非官方第三方工具，与夸克网盘官方无关。
           draft: false
           prerelease: ${{ contains(needs.version.outputs.version, '-') }}
           generate_release_notes: true

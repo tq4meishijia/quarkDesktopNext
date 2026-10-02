@@ -306,7 +306,9 @@ python -m http.server 8123
 - **版本号**：一律从 tag 推导（去掉 `v` 前缀），手动触发同样生效
 - **矩阵**：Linux / macOS / Windows × amd64 / arm64 共 6 个组合，`fail-fast: false`；
   macOS amd64 与 Windows arm64 标记为 experimental，Runner 不支持时该组合跳过而非让工作流失败
-- **产物**：`kuake-desktop-<版本>-<系统>-<架构>[.exe]` + 同名 `.sha256` 校验和
+- **产物**：`kuake-desktop-<版本>-<系统>-<架构>` + 同名 `.sha256` 校验和。
+  Windows 为 `.exe`，Linux 为单文件，macOS 打包为 `.app.zip`（Wails 在 macOS 上产出
+  `.app` 包，故压缩后分发）
 - **发布**：自动创建或更新该 tag 对应的 Release 并上传全部产物；重复运行会覆盖同名产物
 
 本地打 tag 触发发布：
