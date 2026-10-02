@@ -72,3 +72,13 @@ NODE_PATH=<目录>\node_modules node scripts\smoke.mjs
 ```
 
 输出逐条 PASS/FAIL 与 console 错误汇总，退出码 0/1，可接入 CI。
+
+## 辅助脚本（合规与自检）
+
+| 脚本 | 作用 | 用法 |
+| --- | --- | --- |
+| `add-license-header.py` | 为仓库根模块的自有 Go 源码补充版权声明头；已存在声明头的文件会跳过，可重复执行 | `python scripts/add-license-header.py` |
+| `check-frontend-syntax.mjs` | 按 ESM 严格模式批量解析 `frontend/` 下的 JS。`node --check` 对含 import 的 `.js` 不按 ESM 解析，会漏检语法错误 | `node --experimental-vm-modules scripts/check-frontend-syntax.mjs` |
+| `verify-readme-tree.py` | 校验根目录 README「目录结构」一节里出现的路径是否都真实存在，防止文档失真 | `python scripts/verify-readme-tree.py` |
+
+三者都不会修改业务代码；`add-license-header.py` 只写入版权注释，`quark-cil/` 下的上游源码不在其作用范围内。

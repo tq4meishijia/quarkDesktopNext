@@ -1,0 +1,263 @@
+name: Desktop Release
+
+# 触发：推送 v* 标签，或在 Actions 页面手动触发。
+#
+# 与 ci.yml 的分工：ci.yml 负责每次提交的编译校验；本工作流负责把桌面端
+# 编译成各平台可执行文件，并创建/更新对应 tag 的 GitHub Release。
+#
+# 布局说明：桌面端主工程就在仓库根目录，上游 CLI 源码随仓库分发在 quark-cil/
+# （go.mod 的 replace 指向 ./quark-cil），因此无需在 CI 上额外 clone 上游。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '版本号 tag（如 v1.2.3）；留空则自动生成为 v<日期>-<短 sha>'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # 产物名：项目名-版本-系统-架构（版本号本身不含 v 前缀）
+  PROJECT: kuake-desktop
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 解析版本号：push tag 时直接取 tag；手动触发时取输入值，或自动生成
+  # ---------------------------------------------------------------------------
+  version:
+    name: 解析版本号
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="${{ github.event.inputs.tag }}"
+            if [ -z "$tag" ]; then
+              tag="v$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}"
+            fi
+            # 允许填写 1.2.3 或 v1.2.3，统一补齐 v 前缀
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+          fi
+          version="${tag#v}"
+          if [ -z "$version" ]; then
+            echo "无法从 tag '$tag' 推导版本号" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "::notice::tag=$tag version=$version"
+
+  # ---------------------------------------------------------------------------
+  # 2. 构建矩阵：Linux / macOS / Windows × amd64 / arm64
+  #    不稳定或 Runner 暂不支持的组合用 experimental 标记，失败只跳过不影响整体
+  # ---------------------------------------------------------------------------
+  build:
+    name: ${{ matrix.label }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    goos: linux,   goarch: amd64, label: 'Linux amd64',   experimental: false }
+          - { os: ubuntu-24.04-arm, goos: linux,   goarch: arm64, label: 'Linux arm64',   experimental: false }
+          - { os: macos-latest,     goos: darwin,  goarch: arm64, label: 'macOS arm64',   experimental: false }
+          - { os: macos-15-intel,   goos: darwin,  goarch: amd64, label: 'macOS amd64',   experimental: true  }
+          - { os: windows-latest,   goos: windows, goarch: amd64, label: 'Windows amd64', experimental: false }
+          - { os: windows-latest,   goos: windows, goarch: arm64, label: 'Windows arm64', experimental: true  }
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      # 上游 CLI 源码随仓库分发在 quark-cil/，无需额外 clone；此处仅做存在性校验，
+      # 避免 replace 目标缺失时把错误推迟到编译阶段。
+      - name: 校验上游 CLI 源码
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f quark-cil/go.mod ]; then
+            echo "::error::未找到上游 CLI 源码 quark-cil/go.mod"
+            exit 1
+          fi
+          echo "上游 CLI 源码就绪：quark-cil/"
+
+      - name: 安装 Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            quark-cil/go.sum
+
+      # ---------------------------------------------------------------
+      # 预检：补齐系统依赖；明确不支持的组合在此跳过（不算失败）
+      # ---------------------------------------------------------------
+      - name: 预检与系统依赖
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          skip="false"
+          reason=""
+
+          case "$RUNNER_OS" in
+            Linux)
+              sudo apt-get update -qq
+              if ! sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev; then
+                skip="true"; reason="缺少 GTK/WebKit 依赖"
+              fi
+              ;;
+            macOS)
+              # Intel Runner 才能原生构建 darwin/amd64；缺失时由 experimental 兜底
+              if [ "${{ matrix.goarch }}" = "amd64" ] && [ "$(uname -m)" != "x86_64" ]; then
+                skip="true"; reason="当前 Runner 非 x86_64，无法构建 darwin/amd64"
+              fi
+              ;;
+            Windows)
+              if [ "${{ matrix.goarch }}" = "arm64" ]; then
+                skip="true"; reason="Windows/arm64 交叉编译暂不支持（依赖 WinRes + CGO）"
+              fi
+              ;;
+          esac
+
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          if [ "$skip" = "true" ]; then
+            echo "::warning::${{ matrix.label }} 已跳过：$reason"
+          fi
+
+      - name: 安装 Wails CLI
+        if: steps.preflight.outputs.skip != 'true'
+        shell: bash
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.10.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # ---------------------------------------------------------------
+      # 构建：产物直接命名为 项目名-版本-系统-架构[.exe]
+      # ---------------------------------------------------------------
+      - name: 构建 ${{ matrix.goos }}/${{ matrix.goarch }}
+        id: compile
+        if: steps.preflight.outputs.skip != 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="${{ env.PROJECT }}-${{ needs.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          wails build -platform "${{ matrix.goos }}/${{ matrix.goarch }}" -trimpath -ldflags "-s -w" -o "$NAME"
+          ls -la build/bin/
+
+      # ---------------------------------------------------------------
+      # 产物整理 + 校验和（跨平台用 python 生成 SHA-256）
+      # ---------------------------------------------------------------
+      - name: 整理产物与校验和
+        id: package
+        if: steps.preflight.outputs.skip != 'true' && steps.compile.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.compile.outputs.name }}"
+          EXT=""
+          [ "${{ matrix.goos }}" = "windows" ] && EXT=".exe"
+          SRC="build/bin/${NAME}${EXT}"
+          mkdir -p dist
+          if [ ! -f "$SRC" ]; then
+            echo "::error::未找到构建产物 $SRC"; exit 1
+          fi
+          cp "$SRC" "dist/${NAME}${EXT}"
+          chmod +x "dist/${NAME}${EXT}" 2>/dev/null || true
+          python3 - "$NAME" "$EXT" <<'PY'
+          import hashlib, os, sys
+          name, ext = sys.argv[1], sys.argv[2]
+          asset = f"{name}{ext}"
+          path = os.path.join("dist", asset)
+          digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+          with open(path + ".sha256", "w", encoding="utf-8", newline="\n") as fh:
+              fh.write(f"{digest}  {asset}\n")
+          print(f"{asset}: {digest}")
+          PY
+          echo "::notice::${{ matrix.label }} 产物就绪"
+
+      - name: 上传构建产物
+        if: steps.preflight.outputs.skip != 'true' && steps.compile.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.compile.outputs.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3. 发布：创建/更新对应 tag 的 Release 并上传全部产物
+  # ---------------------------------------------------------------------------
+  release:
+    name: 发布 Release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      # 手动触发时 tag 可能还不存在，这里补建（已存在则复用）
+      - name: 确保 tag 存在
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.version.outputs.tag }}"
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "tag $TAG 已存在，复用"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${TAG}" -f "sha=${GITHUB_SHA}"
+            echo "已创建 tag $TAG"
+          fi
+
+      - name: 下载全部产物
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: 列出待上传文件
+        run: ls -la release-assets/
+
+      - name: 创建或更新 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          body: |
+            kuake-desktop ${{ needs.version.outputs.version }}
+
+            基于 [kuake_cli](https://github.com/zhangjingwei/kuake_cli) 的夸克网盘桌面客户端。
+
+            - 请以 `.sha256` 文件核对对应平台的校验和后再运行
+            - Linux / macOS 产物下载后需要执行 `chmod +x` 赋予可执行权限
+            - Windows/arm64 与 macOS/amd64 为实验性组合，本次未产出时会缺席
+          draft: false
+          prerelease: ${{ contains(needs.version.outputs.version, '-') }}
+          generate_release_notes: true
+          # 重复上传同名资产时覆盖而非报错
+          overwrite_files: true
+          files: |
+            release-assets/*
