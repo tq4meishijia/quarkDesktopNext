@@ -1,0 +1,28 @@
+# 统一行尾，避免跨平台协作时的行尾抖动
+* text=auto
+
+# Go 源码与 Unix 脚本：仓库内与检出均使用 LF
+*.go   text eol=lf
+*.sh   text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.js   text eol=lf
+*.ts   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.py   text eol=lf
+*.mjs  text eol=lf
+
+# Windows 脚本：检出为 CRLF，保证 PowerShell / cmd 正常解析
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制资源：禁止任何转换与 diff
+*.png binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.syso binary

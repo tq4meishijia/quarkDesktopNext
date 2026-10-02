@@ -1,0 +1,39 @@
+MIT License
+
+Copyright (c) 2026 tq4meishijia
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+关于本仓库中 quark-cil/ 子目录的重要说明
+-------------------------------------------------------------------------------
+本仓库根目录下的桌面端源码（app/、internal/、main.go、frontend/、scripts/）
+采用上述 MIT 许可证授权。
+
+但本工程在编译期链接 quark-cil/ 子目录中的上游项目 kuake_cli
+（https://github.com/zhangjingwei/kuake_cli，AGPL-3.0 许可，其许可证全文见
+quark-cil/LICENSE）。由于 AGPL-3.0 具有强 copyleft 与网络交互条款（第 13 条），
+任何包含该依赖的“整体分发产物”（即编译得到的可执行文件）在对外分发或提供
+网络服务时，须整体遵循 AGPL-3.0 的要求，包括但不限于：
+  1. 向接收者提供完整对应源码（含本仓库根目录源码与 quark-cil/）；
+  2. 保留 AGPL-3.0 许可证全文与版权声明；
+  3. 若修改了 quark-cil/ 中的代码，须显著标注修改并同样以 AGPL-3.0 提供。
+
+换言之：单独使用本仓库根目录源码时适用 MIT；一旦将其与 quark-cil/ 一同编译并
+分发，整体产物即落入 AGPL-3.0 的约束范围。详见 NOTICE 文件。

@@ -1,0 +1,131 @@
+// Copyright (c) 2026 tq4meishijia
+// SPDX-License-Identifier: MIT
+//
+// 本文件属于 quarkDesktopNext 桌面端自有代码，以 MIT 许可证授权（许可证全文见仓库根 LICENSE）。
+// 注意：本工程在编译期链接 quark-cil/（AGPL-3.0）；将二者一同编译并对外分发的
+// 整体产物须遵循 AGPL-3.0，详见仓库根 NOTICE。
+
+package app
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"kuake-desktop/internal/loginproxy"
+)
+
+// interactiveTimeout 是等待用户完成浏览器登录的上限。
+const interactiveTimeout = 5 * time.Minute
+
+// StartInteractiveLogin 启动本地代理并在系统浏览器打开夸克网盘。
+//
+// 流程：
+//  1. 起一个只代理 *.quark.cn 的临时本地服务，返回入口地址并调起系统浏览器；
+//  2. 用户在浏览器里照常登录（密码只走浏览器与夸克，不经过本进程）；
+//  3. 代理在转发过程中从 Cookie 里取到凭证，自动完成登录并保存；
+//  4. 登录成功后广播 auth:changed，界面切换到主窗口。
+//
+// 通过 InteractiveLoginStatus 轮询进度，CancelInteractiveLogin 可随时中止并释放端口。
+func (a *App) StartInteractiveLogin() (InteractiveLoginState, error) {
+	a.mu.Lock()
+	// 重复点击时先收掉上一轮，避免端口泄漏
+	if a.loginSession != nil {
+		a.loginSession.Close()
+		a.loginSession = nil
+	}
+	session, err := loginproxy.Start(interactiveTimeout)
+	if err != nil {
+		a.mu.Unlock()
+		return InteractiveLoginState{}, err
+	}
+	a.loginSession = session
+	a.loginPhase = PhaseWaiting
+	a.loginHint = "浏览器已打开夸克网盘登录页，登录后会自动回到本窗口。"
+	ctx := a.ctx
+	a.mu.Unlock()
+
+	if ctx != nil {
+		// 打不开也没关系：登录页会展示地址，用户可以手动复制
+		runtime.BrowserOpenURL(ctx, session.URL())
+	}
+
+	go a.awaitInteractiveLogin(session)
+	return a.interactiveState(), nil
+}
+
+// InteractiveLoginStatus 返回当前交互式登录进度，供界面轮询。
+func (a *App) InteractiveLoginStatus() InteractiveLoginState {
+	return a.interactiveState()
+}
+
+// CancelInteractiveLogin 中止等待并释放本地端口。
+func (a *App) CancelInteractiveLogin() bool {
+	a.mu.Lock()
+	session := a.loginSession
+	a.loginSession = nil
+	if session != nil {
+		a.loginPhase = PhaseCancelled
+		a.loginHint = "已取消登录。"
+	}
+	a.mu.Unlock()
+	if session == nil {
+		return false
+	}
+	session.Close()
+	return true
+}
+
+// awaitInteractiveLogin 等待代理捕获凭证，随后复用既有登录流程。
+func (a *App) awaitInteractiveLogin(session *loginproxy.Session) {
+	cookie, err := session.Wait(context.Background())
+
+	a.mu.Lock()
+	if a.loginSession == session {
+		a.loginSession = nil
+	}
+	a.mu.Unlock()
+
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return // CancelInteractiveLogin 已经写好状态，避免重复覆盖
+		}
+		a.setLoginPhase(PhaseError, "交互式登录失败："+err.Error())
+		a.notify("error", "交互式登录失败："+err.Error())
+		return
+	}
+
+	if _, cerr := a.connect(cookie, "interactive"); cerr != nil {
+		a.setLoginPhase(PhaseError, cerr.Error())
+		a.notify("error", "登录校验失败："+cerr.Error())
+		return
+	}
+	a.setLoginPhase(PhaseSuccess, "登录成功。")
+	a.notify("success", "已通过浏览器登录，凭证已保存到本机")
+}
+
+// interactiveState 组装进度快照。
+func (a *App) interactiveState() InteractiveLoginState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	url := ""
+	if a.loginSession != nil {
+		url = a.loginSession.URL()
+	}
+	return InteractiveLoginState{
+		Active: a.loginSession != nil,
+		Phase:  a.loginPhase,
+		Hint:   a.loginHint,
+		URL:    url,
+	}
+}
+
+// setLoginPhase 更新阶段与提示文案。
+func (a *App) setLoginPhase(phase, hint string) {
+	a.mu.Lock()
+	a.loginPhase = phase
+	a.loginHint = hint
+	a.mu.Unlock()
+}

@@ -1,0 +1,1564 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"github.com/zhangjingwei/kuake_cli/cmd/validation"
+	"github.com/zhangjingwei/kuake_cli/sdk"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	ExitSuccess = 0
+	ExitError   = 1
+)
+
+// Version 版本号，与编译产物名称一致
+var Version = "v1.5.0"
+
+type CLIResult struct {
+	Success bool                   `json:"success"`
+	Code    string                 `json:"code,omitempty"`
+	Message string                 `json:"message,omitempty"`
+	Data    map[string]interface{} `json:"data,omitempty"`
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(ExitError)
+	}
+
+	// 解析命令行参数，支持 -cookies 参数
+	var cookies string
+	var command string
+	var args []string
+	skipNext := false
+
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
+
+		if skipNext {
+			skipNext = false
+			continue
+		}
+
+		// 检查是否是 cookies 参数
+		if arg == "-cookies" || arg == "--cookies" {
+			if i+1 < len(os.Args) {
+				cookies = os.Args[i+1]
+				skipNext = true
+				continue
+			} else {
+				outputJSON(&CLIResult{
+					Success: false,
+					Code:    "INVALID_ARGS",
+					Message: fmt.Sprintf("%s requires a cookies value", arg),
+				})
+				os.Exit(ExitError)
+			}
+		}
+
+		// 第一个非配置参数是命令
+		if command == "" {
+			// 检查是否是帮助命令
+			if arg == "help" || arg == "-h" || arg == "--help" {
+				printUsage()
+				os.Exit(ExitSuccess)
+			}
+			// 检查是否是版本命令（在 QuarkClient 初始化之前拦截，无需配置文件）
+			if arg == "version" || arg == "-v" || arg == "--version" {
+				outputJSON(&CLIResult{
+					Success: true,
+					Code:    "OK",
+					Message: fmt.Sprintf("kuake %s", Version),
+					Data: map[string]interface{}{
+						"version": Version,
+					},
+				})
+				os.Exit(ExitSuccess)
+			}
+			command = arg
+		} else {
+			args = append(args, arg)
+		}
+	}
+
+	if command == "" {
+		printUsage()
+		os.Exit(ExitError)
+	}
+
+	loadDotEnvFiles()
+
+	// 创建客户端
+	var client *sdk.QuarkClient
+	defer func() {
+		if r := recover(); r != nil {
+			outputJSON(&CLIResult{
+				Success: false,
+				Code:    "INIT_ERROR",
+				Message: fmt.Sprintf("Failed to initialize client: %v", r),
+			})
+			os.Exit(ExitError)
+		}
+	}()
+	// 优先级：KUAKE_COOKIE（整段）> KUAKE_PUS + KUAKE_PUUS 拼接 > -cookies/--cookies
+	if norm := sdk.ResolveEnvCookieString(); norm != "" {
+		client = sdk.NewQuarkClient(norm)
+	} else if cookies != "" {
+		cookies = normalizeQuarkCookieInput(cookies)
+		if cookies == "" {
+			client = sdk.NewQuarkClient()
+		} else {
+			client = sdk.NewQuarkClient(cookies)
+		}
+	} else {
+		client = sdk.NewQuarkClient()
+	}
+
+	// 执行命令
+	var result *CLIResult
+	switch command {
+	case "user":
+		result = handleUserInfo(client)
+	case "list":
+		result = handleList(client, args)
+	case "info":
+		result = handleInfo(client, args)
+	case "download":
+		result = handleDownload(client, args)
+	case "upload":
+		result = handleUpload(client, args)
+	case "create":
+		result = handleCreateFolder(client, args)
+	case "move":
+		result = handleMove(client, args)
+	case "copy":
+		result = handleCopy(client, args)
+	case "rename":
+		result = handleRename(client, args)
+	case "delete":
+		result = handleDelete(client, args)
+	case "share":
+		result = handleShareCreate(client, args)
+	case "share-delete":
+		result = handleShareDelete(client, args)
+	case "share-list":
+		result = handleShareList(client, args)
+	case "share-save":
+		result = handleShareSave(client, args)
+	case "help", "-h", "--help":
+		printUsage()
+		os.Exit(ExitSuccess)
+	case "version", "-v", "--version":
+		outputJSON(&CLIResult{
+			Success: true,
+			Code:    "OK",
+			Message: fmt.Sprintf("kuake %s", Version),
+			Data: map[string]interface{}{
+				"version": Version,
+			},
+		})
+		os.Exit(ExitSuccess)
+	default:
+		result = &CLIResult{
+			Success: false,
+			Code:    "UNKNOWN_COMMAND",
+			Message: fmt.Sprintf("Unknown command: %s", command),
+		}
+	}
+
+	// 处理流式模式（result 为 nil 表示已经输出完毕）
+	if result == nil {
+		os.Exit(ExitSuccess)
+	}
+
+	// 输出 JSON 结果
+	outputJSON(result)
+
+	// 根据结果设置退出码
+	if !result.Success {
+		os.Exit(ExitError)
+	}
+	os.Exit(ExitSuccess)
+}
+
+func printUsage() {
+	fmt.Fprintf(os.Stderr, `Quark Cloud Drive CLI Tool
+
+Usage:
+  kuake [options] <command> [arguments...]
+
+Options:
+  -cookies, --cookies <value>  Specify cookie value directly (only when KUAKE_COOKIE empty after trim;
+                                adds __pus= prefix)
+  -v, --version                Show version information
+
+Auth:
+  Env cookie: full KUAKE_COOKIE (after trim+normalize) OR split KUAKE_PUS + KUAKE_PUUS (values only, no __pus=/__puus= prefix), then -cookies/--cookies.
+  BREAKING; see CHANGELOG.
+  Optional .env: if .env exists in cwd, load it before creating the client (does not override existing env vars). Set KUAKE_LOAD_DOTENV=0 to disable.
+
+Commands:
+  user                        Get user information
+  list [path] [--stream]     List directory (default: "/")
+                              Use --stream to output one JSON per line for pipeline mode
+  info <path>                 Get file/folder info (supports pipe mode)
+  download <path> [dest]      Get file download URL, or download to local file if dest given (supports pipe mode)
+  upload <file> <dest> [--max_upload_parallel N]
+                              Upload file (all parameters must be quoted)
+  create <name> <pdir>        Create folder (use "/" for root)
+  move <src> <dest>           Move file/folder
+  copy <src> <dest>           Copy file/folder
+  rename <path> <newName>     Rename file/folder
+  delete <path>               Delete file/folder (supports pipe mode)
+  share <path> <days> <passcode>  Create share link
+                                days: 0=permanent, 1/7/30=days
+                                passcode: "true" or "false"
+  share-delete <share_id_or_path>...  Delete share(s) by share ID(s) or file path(s)
+  share-list [page] [size] [orderField] [orderType]  Get my share list
+                                page: page number (default: 1)
+                                size: page size (default: 50)
+                                orderField: sort field (default: "created_at")
+                                orderType: "asc" or "desc" (default: "desc")
+  share-save <share_link> [passcode] [dest_dir]  Save shared files to your drive
+                                share_link: share link (e.g., "https://pan.quark.cn/s/xxx")
+                                passcode: extraction code (optional, auto-extracted from link if present)
+                                dest_dir: destination directory (default: "/")
+  version                     Show version information
+  help                           Show help
+
+Examples:
+  kuake user
+  kuake list "/"
+  kuake info "/file.txt"
+  kuake download "/file.txt"
+  kuake download "/file.txt" .
+  kuake download "/file.txt" ./local.zip
+  kuake upload "file.txt" "/folder/file.txt"
+  kuake upload "file.txt" "/folder/file.txt" --max_upload_parallel 4
+  kuake create "folder" "/"
+  kuake move "/file.txt" "/folder/"
+  kuake share "/file.txt" 7 "false"
+  kuake share-delete "fdd8bfd93f21491ab80122538bec310d"
+  kuake share-delete "/file.txt"
+  kuake share-list
+  kuake share-list 1 50 "created_at" "desc"
+  kuake share-save "https://pan.quark.cn/s/xxx"
+  kuake share-save "https://pan.quark.cn/s/xxx" "1234" "/folder"
+  
+  # Using -cookies parameter:
+  kuake -cookies "your_cookie_value_here" user
+  kuake -cookies "your_cookie_value_here" upload "file.txt" "/folder/file.txt"
+
+Pipeline Mode:
+  Commands can be chained using Unix pipes. When stdin has data, commands automatically
+  switch to pipe mode and process input line by line.
+  
+  Examples:
+    # List files and delete them
+    kuake list "/photos" --stream | kuake delete
+    
+    # List files and get info for each
+    kuake list "/" --stream | kuake info
+    
+    # List files and get download URLs
+    kuake list "/documents" --stream | kuake download
+    
+    # List files, filter with jq, then delete
+    kuake list "/" --stream | jq -r 'select(.size > 1000000) | .path' | kuake delete
+
+Notes:
+  - All path parameters must be quoted
+  - Root directory is "/"
+  - Upload parallel: --max_upload_parallel overrides KUAKE_UPLOAD_PARALLEL when both apply; if only
+    env is set (1-16) it is used when the flag is omitted (default 4)
+  - Results output as JSON to stdout
+  - Exit code: 0=success, 1=failure
+  - If KUAKE_COOKIE is set (non-empty after trim), it wins over -cookies
+  - In pipe mode, each input line should be a JSON object with "path" or "fid" field
+  - Use --stream with list command to output one JSON per line for pipeline processing
+`)
+}
+
+func outputJSON(result *CLIResult) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false) // 禁用 HTML 转义，避免 < > 被转义为 \u003c \u003e
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(result); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to serialize result: %v\n", err)
+		os.Exit(ExitError)
+	}
+	// Encode 会添加换行符，我们需要去掉它
+	output := buf.String()
+	if len(output) > 0 && output[len(output)-1] == '\n' {
+		output = output[:len(output)-1]
+	}
+	// 写入 stdout，捕获 broken pipe 错误
+	if _, err := fmt.Println(output); err != nil {
+		// 忽略 broken pipe 错误（管道接收端已关闭）
+		if strings.Contains(err.Error(), "broken pipe") {
+			// 静默退出，这是正常的管道行为
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "Failed to write output: %v\n", err)
+		os.Exit(ExitError)
+	}
+}
+
+// hasStdinData 检测 stdin 是否有数据可读
+func hasStdinData() bool {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	// 检查是否是管道或重定向（不是终端）
+	return (stat.Mode() & os.ModeCharDevice) == 0
+}
+
+// extractPathFromJSON 从 JSON 中提取路径或 fid
+// 支持两种格式：
+// 1. 完整响应格式：{"success": true, "data": {"path": "...", "fid": "..."}} - 流式输出格式
+// 2. 简化格式：{"path": "...", "fid": "..."}
+func extractPathFromJSON(jsonStr string) (string, string, error) {
+	return validation.ExtractPathFromJSON(jsonStr)
+}
+
+// processStdinLines 从 stdin 逐行读取并处理
+// processor 函数接收 path 和 fid，返回处理结果
+func processStdinLines(processor func(path, fid string) *CLIResult) {
+	scanner := bufio.NewScanner(os.Stdin)
+	hasError := false
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		path, fid, err := extractPathFromJSON(line)
+		if err != nil {
+			// 如果解析失败，尝试将整行作为路径
+			path = line
+			fid = ""
+		}
+
+		if path == "" && fid == "" {
+			outputJSON(&CLIResult{
+				Success: false,
+				Code:    "INVALID_INPUT",
+				Message: fmt.Sprintf("cannot extract path or fid from input: %s", line),
+			})
+			hasError = true
+			continue
+		}
+
+		// 如果只有 fid，使用 fid；否则使用 path
+		var result *CLIResult
+		if path != "" {
+			result = processor(path, fid)
+		} else if fid != "" {
+			// 只有 fid 时，需要先获取文件信息
+			result = processor("", fid)
+		} else {
+			result = &CLIResult{
+				Success: false,
+				Code:    "INVALID_INPUT",
+				Message: "both path and fid are empty",
+			}
+		}
+
+		// 输出结果（流式输出，每行一个 JSON）
+		outputJSON(result)
+		if !result.Success {
+			hasError = true
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		// 忽略 broken pipe 错误（管道发送端已关闭）
+		if !strings.Contains(err.Error(), "broken pipe") {
+			outputJSON(&CLIResult{
+				Success: false,
+				Code:    "STDIN_READ_ERROR",
+				Message: fmt.Sprintf("failed to read from stdin: %v", err),
+			})
+			hasError = true
+		}
+	}
+
+	if hasError {
+		os.Exit(ExitError)
+	}
+}
+
+// outputStreamJSON 输出流式 JSON（每行一个 JSON 对象，不格式化）
+func outputStreamJSON(result *CLIResult) {
+	// 使用 Marshal 确保输出紧凑的单行 JSON（Marshal 默认就是紧凑格式，不格式化）
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to serialize result: %v\n", err)
+		return
+	}
+	// 直接写入 stdout
+	_, err = os.Stdout.Write(jsonBytes)
+	if err != nil {
+		// 忽略 broken pipe 错误（管道接收端已关闭）
+		if strings.Contains(err.Error(), "broken pipe") {
+			// 静默退出，这是正常的管道行为
+			os.Exit(0)
+		}
+		return
+	}
+	// 添加换行符
+	os.Stdout.WriteString("\n")
+}
+
+// handleUserInfo 处理获取用户信息命令
+func handleUserInfo(client *sdk.QuarkClient) *CLIResult {
+	response, err := client.GetUserInfo()
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	if !response.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    response.Code,
+			Message: response.Message,
+		}
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    response.Code,
+		Message: response.Message,
+		Data:    response.Data,
+	}
+}
+
+// handleUpload 处理上传文件命令
+func handleUpload(client *sdk.QuarkClient, args []string) *CLIResult {
+	if len(args) < 2 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: upload <file> <dest> [--max_upload_parallel N] [--policy skip|overwrite|rsync] (all parameters must be quoted)`,
+		}
+	}
+
+	filePath := args[0]
+	destPath := args[1]
+	var uploadParallel string
+	opts := &sdk.UploadOptions{
+		Policy: sdk.UploadPolicySkip, // 默认跳过
+	}
+
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--max_upload_parallel", "--max-upload-parallel", "--upload-parallel":
+			if i+1 >= len(args) {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_ARGS",
+					Message: "missing value for --max_upload_parallel",
+				}
+			}
+			value := strings.TrimSpace(args[i+1])
+			parallel, err := validation.ParseOptionalIntArg(value, "max_upload_parallel", 1)
+			if err != nil || parallel < 1 {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_ARGS",
+					Message: "invalid --max_upload_parallel, must be integer >= 1",
+				}
+			}
+			uploadParallel = strconv.Itoa(parallel)
+			i++
+		case "--policy":
+			if i+1 >= len(args) {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_ARGS",
+					Message: "missing value for --policy (skip/overwrite/rsync)",
+				}
+			}
+			policyArg := strings.ToLower(strings.TrimSpace(args[i+1]))
+			if policyArg != "skip" && policyArg != "overwrite" && policyArg != "rsync" {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_ARGS",
+					Message: "invalid --policy value, must be 'skip', 'overwrite', or 'rsync'",
+				}
+			}
+			opts.Policy = sdk.UploadPolicy(policyArg)
+			i++
+		default:
+			return &CLIResult{
+				Success: false,
+				Code:    "INVALID_ARGS",
+				Message: fmt.Sprintf("unknown upload option: %s", args[i]),
+			}
+		}
+	}
+
+	if v := resolveUploadParallelForProcess(uploadParallel); v != "" {
+		_ = os.Setenv("KUAKE_UPLOAD_PARALLEL", v)
+	}
+
+	// 进度回调，显示上传进度、速度和剩余时间
+	progressCallback := func(progress *sdk.UploadProgress) {
+		if progress == nil {
+			return
+		}
+		// 输出到 stderr，避免干扰 JSON 输出
+		if progress.SpeedStr == "秒传（文件已存在）" {
+			// 秒传情况，显示特殊提示
+			fmt.Fprintf(os.Stderr, "\r上传进度: %d%% | %s", progress.Progress, progress.SpeedStr)
+		} else {
+			fmt.Fprintf(os.Stderr, "\r上传进度: %d%% | 速度: %s | 剩余: %s",
+				progress.Progress, progress.SpeedStr, progress.RemainingStr)
+		}
+		if progress.Progress == 100 {
+			fmt.Fprintf(os.Stderr, "\n")
+		}
+	}
+
+	response, err := client.UploadFile(filePath, destPath, progressCallback, opts)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	if !response.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    response.Code,
+			Message: response.Message,
+		}
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    response.Code,
+		Message: response.Message,
+		Data:    response.Data,
+	}
+}
+
+// handleList 处理列出目录命令
+func handleList(client *sdk.QuarkClient, args []string) *CLIResult {
+	dirPath := "/"
+	streamMode := false
+	
+	// 解析参数，支持 --stream 选项
+	var filteredArgs []string
+	for i, arg := range args {
+		if arg == "--stream" || arg == "-s" {
+			streamMode = true
+		} else if i == 0 {
+			dirPath = arg
+		} else {
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+
+	response, err := client.List(dirPath)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	if !response.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    response.Code,
+			Message: response.Message,
+		}
+	}
+
+	// 流式模式：每行输出一个文件的 JSON
+	if streamMode {
+		// 从 response.Data 中提取 list 数组
+		// response.Data 的类型是 map[string]interface{}，但 list 字段的实际类型是 []sdk.QuarkFileInfo
+		if quarkFileInfos, ok := response.Data["list"].([]sdk.QuarkFileInfo); ok {
+			// 将 QuarkFileInfo 转换为 map[string]interface{} 并逐行输出
+			for _, qfi := range quarkFileInfos {
+				fileInfo := map[string]interface{}{
+					"fid":          qfi.Fid,
+					"file_name":    qfi.Name,
+					"path":         qfi.Path,
+					"size":         qfi.Size,
+					"ctime":        qfi.CreateTime,
+					"mtime":        qfi.ModifyTime,
+					"dir":          qfi.IsDirectory,
+					"download_url": qfi.DownloadURL,
+					"created_at":   qfi.CreatedAt,
+					"updated_at":   qfi.UpdatedAt,
+					"l_created_at": qfi.LCreatedAt,
+					"l_updated_at": qfi.LUpdatedAt,
+				}
+				fileResult := &CLIResult{
+					Success: true,
+					Code:    response.Code,
+					Message: "OK",
+					Data:    fileInfo,
+				}
+				outputStreamJSON(fileResult)
+			}
+			// 流式模式下不返回结果，已经逐行输出
+			return nil
+		}
+		// 如果无法提取 list，回退到普通模式
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    response.Code,
+		Message: response.Message,
+		Data:    response.Data,
+	}
+}
+
+// handleInfo 处理获取文件信息命令
+func handleInfo(client *sdk.QuarkClient, args []string) *CLIResult {
+	// 检查是否有 stdin 输入（管道模式）
+	if hasStdinData() {
+		processStdinLines(func(path, fid string) *CLIResult {
+			// 优先使用 path，如果没有则使用 fid
+			targetPath := path
+			if targetPath == "" && fid != "" {
+				// 只有 fid 时，尝试直接使用（某些 API 可能支持）
+				targetPath = fid
+			}
+			
+			if targetPath == "" {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_INPUT",
+					Message: "cannot determine path or fid from input",
+				}
+			}
+
+			response, err := client.GetFileInfo(targetPath)
+			if err != nil {
+				return &CLIResult{
+					Success: false,
+					Message: err.Error(),
+				}
+			}
+
+			if !response.Success {
+				return &CLIResult{
+					Success: false,
+					Code:    response.Code,
+					Message: response.Message,
+				}
+			}
+
+			return &CLIResult{
+				Success: true,
+				Code:    response.Code,
+				Message: response.Message,
+				Data:    response.Data,
+			}
+		})
+		// processStdinLines 已经处理了所有输出，返回 nil 表示已完成
+		return nil
+	}
+
+	// 普通模式：从命令行参数读取
+	if len(args) < 1 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: info <path> (path must be quoted, e.g., info 'file(1).txt') or use pipe mode`,
+		}
+	}
+
+	path := args[0]
+	response, err := client.GetFileInfo(path)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	if !response.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    response.Code,
+			Message: response.Message,
+		}
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    response.Code,
+		Message: response.Message,
+		Data:    response.Data,
+	}
+}
+
+// handleCreateFolder 处理创建文件夹命令
+func handleCreateFolder(client *sdk.QuarkClient, args []string) *CLIResult {
+	if len(args) < 2 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: create <name> <pdir> (all parameters must be quoted, e.g., create 'folder(1)' '/')`,
+		}
+	}
+
+	folderName := args[0]
+	pdirArg := args[1]
+
+	// 处理父目录参数：如果是路径（以 / 开头），需要转换为 FID
+	var pdirFid string
+	if pdirArg == "" || pdirArg == "/" {
+		pdirFid = "/" // 根目录使用标准表示 "/"，SDK 会自动转换为 "0"
+	} else if strings.HasPrefix(pdirArg, "/") {
+		// 是路径字符串，需要转换为 FID
+		dirInfo, err := client.GetFileInfo(pdirArg)
+		if err != nil {
+			return &CLIResult{
+				Success: false,
+				Code:    "GET_PARENT_DIRECTORY_ERROR",
+				Message: fmt.Sprintf("failed to get parent directory info: %v", err),
+			}
+		}
+		if !dirInfo.Success {
+			return &CLIResult{
+				Success: false,
+				Code:    dirInfo.Code,
+				Message: fmt.Sprintf("failed to get parent directory: %s", dirInfo.Message),
+			}
+		}
+		// 安全地获取 fid
+		fid, ok := dirInfo.Data["fid"].(string)
+		if !ok || fid == "" {
+			return &CLIResult{
+				Success: false,
+				Code:    "INVALID_PARENT_DIRECTORY",
+				Message: "parent directory info is invalid: fid not found or empty",
+			}
+		}
+		pdirFid = fid
+	} else {
+		// 假设是 FID（不是以 / 开头的字符串）
+		pdirFid = pdirArg
+	}
+
+	response, err := client.CreateFolder(folderName, pdirFid)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	if !response.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    response.Code,
+			Message: response.Message,
+		}
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    response.Code,
+		Message: response.Message,
+		Data:    response.Data,
+	}
+}
+
+// handleMove 处理移动命令
+func handleMove(client *sdk.QuarkClient, args []string) *CLIResult {
+	if len(args) < 2 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: move <src> <dest> (all parameters must be quoted, e.g., move 'file(1).txt' '/dest/')`,
+		}
+	}
+
+	srcPath := args[0]
+	destPath := args[1]
+
+	response, err := client.Move(srcPath, destPath)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	if !response.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    response.Code,
+			Message: response.Message,
+		}
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    response.Code,
+		Message: response.Message,
+		Data:    response.Data,
+	}
+}
+
+// handleCopy 处理复制命令
+func handleCopy(client *sdk.QuarkClient, args []string) *CLIResult {
+	if len(args) < 2 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: copy <src> <dest> (all parameters must be quoted, e.g., copy 'file(1).txt' '/dest/')`,
+		}
+	}
+
+	srcPath := args[0]
+	destPath := args[1]
+
+	response, err := client.Copy(srcPath, destPath)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	if !response.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    response.Code,
+			Message: response.Message,
+		}
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    response.Code,
+		Message: response.Message,
+		Data:    response.Data,
+	}
+}
+
+// handleRename 处理重命名命令
+func handleRename(client *sdk.QuarkClient, args []string) *CLIResult {
+	if len(args) < 2 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: rename <path> <newName> (all parameters must be quoted, e.g., rename 'file(1).txt' 'new_name.txt')`,
+		}
+	}
+
+	path := args[0]
+	newName := args[1]
+
+	response, err := client.Rename(path, newName)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	if !response.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    response.Code,
+			Message: response.Message,
+		}
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    response.Code,
+		Message: response.Message,
+		Data:    response.Data,
+	}
+}
+
+// handleDelete 处理删除命令
+func handleDelete(client *sdk.QuarkClient, args []string) *CLIResult {
+	// 检查是否有 stdin 输入（管道模式）
+	if hasStdinData() {
+		processStdinLines(func(path, fid string) *CLIResult {
+			// 优先使用 path，如果没有则尝试使用 fid 作为路径
+			targetPath := path
+			if targetPath == "" && fid != "" {
+				// 尝试直接使用 fid 作为路径（某些情况下可能有效）
+				targetPath = fid
+			}
+			
+			if targetPath == "" {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_INPUT",
+					Message: "cannot determine path or fid from input",
+				}
+			}
+
+			response, err := client.Delete(targetPath)
+			if err != nil {
+				return &CLIResult{
+					Success: false,
+					Message: err.Error(),
+				}
+			}
+
+			if !response.Success {
+				return &CLIResult{
+					Success: false,
+					Code:    response.Code,
+					Message: response.Message,
+				}
+			}
+
+			return &CLIResult{
+				Success: true,
+				Code:    response.Code,
+				Message: response.Message,
+				Data:    response.Data,
+			}
+		})
+		// processStdinLines 已经处理了所有输出，返回 nil 表示已完成
+		return nil
+	}
+
+	// 普通模式：从命令行参数读取
+	if len(args) < 1 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: delete <path> (path must be quoted, e.g., delete 'file(1).txt') or use pipe mode`,
+		}
+	}
+
+	path := args[0]
+	response, err := client.Delete(path)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	if !response.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    response.Code,
+			Message: response.Message,
+		}
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    response.Code,
+		Message: response.Message,
+		Data:    response.Data,
+	}
+}
+
+// handleShareCreate 处理创建分享链接命令
+func handleShareCreate(client *sdk.QuarkClient, args []string) *CLIResult {
+	if len(args) < 3 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: "Usage: share <path> <days> <passcode> (path and passcode must be quoted, e.g., share \"file(1).txt\" 7 \"false\")",
+		}
+	}
+
+	path := args[0]
+
+	// 解析有效期天数（必传）
+	expireDays, err := validation.ParseIntArg(args[1], "days")
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: err.Error(),
+		}
+	}
+
+	// 解析是否需要提取码（必传）
+	needPasscode, err := validation.ParseBoolArg(args[2], "passcode")
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: err.Error(),
+		}
+	}
+
+	shareInfo, err := client.CreateShare(path, expireDays, needPasscode)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	data := map[string]interface{}{
+		"share_url":  shareInfo.ShareURL,
+		"pwd_id":     shareInfo.PwdID,
+		"passcode":   shareInfo.Passcode,
+		"expires_at": shareInfo.ExpiresAt,
+	}
+
+	if shareInfo.ExpiresAt > 0 {
+		expireTime := time.Unix(shareInfo.ExpiresAt/1000, 0)
+		data["expires_at_formatted"] = expireTime.Format("2006-01-02 15:04:05")
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    "OK",
+		Message: "Share link created successfully",
+		Data:    data,
+	}
+}
+
+// handleDownload 处理下载命令：download <path> [dest]
+// 若提供 dest则下载到本地文件并输出进度；否则仅返回下载链接 JSON
+func handleDownload(client *sdk.QuarkClient, args []string) *CLIResult {
+	// 检查是否有 stdin 输入（管道模式）
+	destPath := ""
+	if len(args) >= 1 {
+		destPath = args[0] // 管道模式下，第一个参数可能是 dest
+	}
+
+	if hasStdinData() {
+		processStdinLines(func(path, fid string) *CLIResult {
+			// 优先使用 path，如果没有则使用 fid
+			targetPath := path
+			if targetPath == "" && fid != "" {
+				// 只有 fid 时，尝试直接使用
+				targetPath = fid
+			}
+			
+			if targetPath == "" {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_INPUT",
+					Message: "cannot determine path or fid from input",
+				}
+			}
+
+			fileInfo, err := client.GetFileInfo(targetPath)
+			if err != nil {
+				return &CLIResult{
+					Success: false,
+					Message: fmt.Sprintf("failed to get file info: %v", err),
+				}
+			}
+			if !fileInfo.Success {
+				return &CLIResult{
+					Success: false,
+					Code:    fileInfo.Code,
+					Message: fileInfo.Message,
+				}
+			}
+
+			fileFid, ok := fileInfo.Data["fid"].(string)
+			if !ok || fileFid == "" {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_FILE_INFO",
+					Message: "file info does not contain valid fid",
+				}
+			}
+
+			isDir, _ := fileInfo.Data["dir"].(bool)
+			if isDir {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_FILE_TYPE",
+					Message: "cannot download directory",
+				}
+			}
+
+			fileName, _ := fileInfo.Data["file_name"].(string)
+			if fileName == "" {
+				fileName = filepath.Base(targetPath)
+			}
+			if fileName == "" || fileName == "." {
+				fileName = "download"
+			}
+
+			// 如果提供了 dest，下载到本地
+			if destPath != "" {
+				var lastProgress *sdk.DownloadProgress
+				var lastPrint time.Time
+				err = client.DownloadFile(fileFid, destPath, fileName, func(p *sdk.DownloadProgress) {
+					lastProgress = p
+					now := time.Now()
+					if now.Sub(lastPrint) < 500*time.Millisecond && p.Total >= 0 && p.Downloaded < p.Total {
+						return
+					}
+					lastPrint = now
+					if p.Total > 0 {
+						pct := float64(p.Downloaded) / float64(p.Total) * 100
+						fmt.Fprintf(os.Stderr, "\rDownloaded %.2f MB / %.2f MB (%.1f%%)", float64(p.Downloaded)/(1024*1024), float64(p.Total)/(1024*1024), pct)
+					} else {
+						fmt.Fprintf(os.Stderr, "\rDownloaded %.2f MB", float64(p.Downloaded)/(1024*1024))
+					}
+				})
+				if err != nil {
+					return &CLIResult{
+						Success: false,
+						Message: fmt.Sprintf("download failed: %v", err),
+					}
+				}
+				if lastProgress != nil && lastProgress.Total > 0 {
+					fmt.Fprintf(os.Stderr, "\rDownloaded %.2f MB / %.2f MB (100.0%%)\n", float64(lastProgress.Downloaded)/(1024*1024), float64(lastProgress.Total)/(1024*1024))
+				} else {
+					fmt.Fprintf(os.Stderr, "\n")
+				}
+				localPath := destPath
+				if destPath == "" || destPath == "." || strings.HasSuffix(destPath, "/") || strings.HasSuffix(destPath, string(filepath.Separator)) {
+					localPath = filepath.Join(destPath, fileName)
+				} else if info, err := os.Stat(destPath); err == nil && info.IsDir() {
+					localPath = filepath.Join(destPath, fileName)
+				}
+				return &CLIResult{
+					Success: true,
+					Code:    "OK",
+					Message: "File downloaded successfully",
+					Data:    map[string]interface{}{"local_path": localPath, "path": targetPath},
+				}
+			}
+
+			// 未指定 dest：仅返回下载链接
+			downloadURL, err := client.GetDownloadURL(fileFid)
+			if err != nil {
+				return &CLIResult{
+					Success: false,
+					Message: fmt.Sprintf("failed to get download URL: %v", err),
+				}
+			}
+			return &CLIResult{
+				Success: true,
+				Code:    "OK",
+				Message: "Download URL retrieved successfully",
+				Data:    map[string]interface{}{"fid": fileFid, "path": targetPath, "download_url": downloadURL},
+			}
+		})
+		// processStdinLines 已经处理了所有输出，返回 nil 表示已完成
+		return nil
+	}
+
+	// 普通模式：从命令行参数读取
+	if len(args) < 1 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: download <path> [dest] (path must be quoted, e.g., download "/file.txt" or download "/file.txt" ./local) or use pipe mode`,
+		}
+	}
+
+	path := args[0]
+	destPath = ""
+	if len(args) >= 2 {
+		destPath = args[1]
+	}
+
+	fileInfo, err := client.GetFileInfo(path)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: fmt.Sprintf("failed to get file info: %v", err),
+		}
+	}
+	if !fileInfo.Success {
+		return &CLIResult{
+			Success: false,
+			Code:    fileInfo.Code,
+			Message: fileInfo.Message,
+		}
+	}
+
+	fid, ok := fileInfo.Data["fid"].(string)
+	if !ok || fid == "" {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_FILE_INFO",
+			Message: "file info does not contain valid fid",
+		}
+	}
+
+	isDir, _ := fileInfo.Data["dir"].(bool)
+	if isDir {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_FILE_TYPE",
+			Message: "cannot download directory",
+		}
+	}
+
+	fileName, _ := fileInfo.Data["file_name"].(string)
+	if fileName == "" {
+		fileName = filepath.Base(path)
+	}
+	if fileName == "" || fileName == "." {
+		fileName = "download"
+	}
+
+	// 指定了 dest：下载到本地
+	if destPath != "" {
+		var lastProgress *sdk.DownloadProgress
+		var lastPrint time.Time
+		err = client.DownloadFile(fid, destPath, fileName, func(p *sdk.DownloadProgress) {
+			lastProgress = p
+			now := time.Now()
+			if now.Sub(lastPrint) < 500*time.Millisecond && p.Total >= 0 && p.Downloaded < p.Total {
+				return
+			}
+			lastPrint = now
+			if p.Total > 0 {
+				pct := float64(p.Downloaded) / float64(p.Total) * 100
+				fmt.Fprintf(os.Stderr, "\rDownloaded %.2f MB / %.2f MB (%.1f%%)", float64(p.Downloaded)/(1024*1024), float64(p.Total)/(1024*1024), pct)
+			} else {
+				fmt.Fprintf(os.Stderr, "\rDownloaded %.2f MB", float64(p.Downloaded)/(1024*1024))
+			}
+		})
+		if err != nil {
+			return &CLIResult{
+				Success: false,
+				Message: fmt.Sprintf("download failed: %v", err),
+			}
+		}
+		if lastProgress != nil && lastProgress.Total > 0 {
+			fmt.Fprintf(os.Stderr, "\rDownloaded %.2f MB / %.2f MB (100.0%%)\n", float64(lastProgress.Downloaded)/(1024*1024), float64(lastProgress.Total)/(1024*1024))
+		} else {
+			fmt.Fprintf(os.Stderr, "\n")
+		}
+		// 解析最终本地路径（与 SDK 逻辑一致）
+		localPath := destPath
+		if destPath == "" || destPath == "." || strings.HasSuffix(destPath, "/") || strings.HasSuffix(destPath, string(filepath.Separator)) {
+			localPath = filepath.Join(destPath, fileName)
+		} else if info, err := os.Stat(destPath); err == nil && info.IsDir() {
+			localPath = filepath.Join(destPath, fileName)
+		}
+		return &CLIResult{
+			Success: true,
+			Code:    "OK",
+			Message: "File downloaded successfully",
+			Data:    map[string]interface{}{"local_path": localPath, "path": path},
+		}
+	}
+
+	// 未指定 dest：仅返回下载链接
+	downloadURL, err := client.GetDownloadURL(fid)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: fmt.Sprintf("failed to get download URL: %v", err),
+		}
+	}
+	return &CLIResult{
+		Success: true,
+		Code:    "OK",
+		Message: "Download URL retrieved successfully",
+		Data:    map[string]interface{}{"fid": fid, "path": path, "download_url": downloadURL},
+	}
+}
+
+// handleShareDelete 处理取消分享命令
+// 支持两种方式：
+// 1. 直接提供 share_id: share-delete "fdd8bfd93f21491ab80122538bec310d"
+// 2. 提供文件路径: share-delete "/file.txt" (会先获取文件信息，然后从分享列表中查找share_id)
+func handleShareDelete(client *sdk.QuarkClient, args []string) *CLIResult {
+	if len(args) < 1 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: share-delete <share_id_or_path> [share_id_or_path2] ... (e.g., share-delete "fdd8bfd93f21491ab80122538bec310d" or share-delete "/file.txt")`,
+		}
+	}
+
+	var shareIDs []string
+	var paths []string
+
+	// 区分 share_id 和文件路径
+	// share_id 通常是32位十六进制字符串，不以 "/" 开头
+	// 文件路径通常以 "/" 开头
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "/") {
+			// 是文件路径
+			paths = append(paths, arg)
+		} else {
+			// 假设是 share_id
+			shareIDs = append(shareIDs, arg)
+		}
+	}
+
+	// 处理文件路径：获取文件信息，然后从分享列表中查找share_id
+	if len(paths) > 0 {
+		for _, path := range paths {
+			// 获取文件信息
+			fileInfo, err := client.GetFileInfo(path)
+			if err != nil {
+				return &CLIResult{
+					Success: false,
+					Code:    "GET_FILE_INFO_ERROR",
+					Message: fmt.Sprintf("failed to get file info for path '%s': %v", path, err),
+				}
+			}
+
+			if !fileInfo.Success {
+				return &CLIResult{
+					Success: false,
+					Code:    fileInfo.Code,
+					Message: fmt.Sprintf("failed to get file info for path '%s': %s", path, fileInfo.Message),
+				}
+			}
+
+			// 获取fid
+			fid, ok := fileInfo.Data["fid"].(string)
+			if !ok || fid == "" {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_FILE_INFO",
+					Message: fmt.Sprintf("file '%s' does not have valid fid", path),
+				}
+			}
+
+			// 从分享列表中查找share_id
+			shareID, err := client.GetShareIDByFid(fid)
+			if err != nil {
+				return &CLIResult{
+					Success: false,
+					Code:    "GET_SHARE_ID_ERROR",
+					Message: fmt.Sprintf("failed to get share_id for file '%s' (fid: %s): %v. The file may not be shared.", path, fid, err),
+				}
+			}
+
+			shareIDs = append(shareIDs, shareID)
+		}
+	}
+
+	// 如果没有找到任何 share_id，返回错误
+	if len(shareIDs) == 0 {
+		return &CLIResult{
+			Success: false,
+			Code:    "NO_SHARE_IDS",
+			Message: "no valid share_ids found. Please provide share_id(s) or file path(s) with active shares.",
+		}
+	}
+
+	// 删除分享
+	err := client.DeleteShare(shareIDs)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	resultData := map[string]interface{}{
+		"deleted_share_ids": shareIDs,
+	}
+	if len(paths) > 0 {
+		resultData["processed_paths"] = paths
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    "OK",
+		Message: "Share deleted successfully",
+		Data:    resultData,
+	}
+}
+
+// handleShareList 处理获取我的分享列表命令
+func handleShareList(client *sdk.QuarkClient, args []string) *CLIResult {
+	// 解析参数，支持可选参数
+	page := 1
+	size := 50
+	orderField := "created_at"
+	orderType := "desc"
+
+	if len(args) > 0 {
+		if p, err := validation.ParseOptionalIntArg(args[0], "page", page); err == nil && p > 0 {
+			page = p
+		}
+	}
+	if len(args) > 1 {
+		if s, err := validation.ParseOptionalIntArg(args[1], "size", size); err == nil && s > 0 {
+			size = s
+		}
+	}
+	if len(args) > 2 {
+		orderField = args[2]
+	}
+	if len(args) > 3 {
+		orderType = args[3]
+	}
+
+	shareList, err := client.GetMyShareList(page, size, orderField, orderType)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Message: err.Error(),
+		}
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    "OK",
+		Message: "Get share list successfully",
+		Data:    shareList,
+	}
+}
+
+// handleShareSave 处理转存分享文件命令
+// 用法: share-save <share_link> [passcode] [dest_dir]
+func handleShareSave(client *sdk.QuarkClient, args []string) *CLIResult {
+	if len(args) < 1 {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_ARGS",
+			Message: `Usage: share-save <share_link> [passcode] [dest_dir] (e.g., share-save "https://pan.quark.cn/s/xxx" "1234" "/folder")`,
+		}
+	}
+
+	shareLink := args[0]
+	var passcode string
+	var destDir string
+
+	// 解析参数
+	if len(args) >= 2 {
+		// 第二个参数可能是 passcode 或 dest_dir（如果以 / 开头）
+		if strings.HasPrefix(args[1], "/") {
+			destDir = args[1]
+		} else {
+			passcode = args[1]
+		}
+	}
+	if len(args) >= 3 {
+		destDir = args[2]
+	}
+
+	// 从分享链接中提取 pwdID 和 passcode
+	shareInfo, err := client.GetShareInfo(shareLink)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_SHARE_LINK",
+			Message: fmt.Sprintf("failed to parse share link: %v", err),
+		}
+	}
+
+	// 如果命令行提供了 passcode，优先使用命令行的
+	if passcode == "" && shareInfo.Passcode != "" {
+		passcode = shareInfo.Passcode
+	}
+
+	// 获取 stoken
+	stokenData, err := client.GetShareStoken(shareInfo.PwdID, passcode)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Code:    "GET_STOKEN_ERROR",
+			Message: fmt.Sprintf("failed to get share stoken: %v", err),
+		}
+	}
+
+	// 从 stokenData 中提取 stoken
+	stoken, ok := stokenData["stoken"].(string)
+	if !ok || stoken == "" {
+		return &CLIResult{
+			Success: false,
+			Code:    "INVALID_STOKEN",
+			Message: "stoken not found in response",
+		}
+	}
+
+	// 处理目标目录
+	toPdirFid := "0" // 默认根目录
+	if destDir != "" {
+		if destDir == "/" {
+			toPdirFid = "0"
+		} else if strings.HasPrefix(destDir, "/") {
+			// 是路径，需要转换为 FID
+			dirInfo, err := client.GetFileInfo(destDir)
+			if err != nil {
+				return &CLIResult{
+					Success: false,
+					Code:    "GET_DEST_DIR_ERROR",
+					Message: fmt.Sprintf("failed to get destination directory info: %v", err),
+				}
+			}
+			if !dirInfo.Success {
+				return &CLIResult{
+					Success: false,
+					Code:    dirInfo.Code,
+					Message: fmt.Sprintf("failed to get destination directory: %s", dirInfo.Message),
+				}
+			}
+			// 安全地获取 fid
+			fid, ok := dirInfo.Data["fid"].(string)
+			if !ok || fid == "" {
+				return &CLIResult{
+					Success: false,
+					Code:    "INVALID_DEST_DIR",
+					Message: "destination directory info is invalid: fid not found or empty",
+				}
+			}
+			toPdirFid = fid
+		} else {
+			// 假设是 FID
+			toPdirFid = destDir
+		}
+	}
+
+	// 转存文件（全部保存）
+	// fidList 和 shareTokenList 为空表示全部保存
+	result, err := client.SaveShareFile(shareInfo.PwdID, stoken, []string{}, []string{}, toPdirFid, true)
+	if err != nil {
+		return &CLIResult{
+			Success: false,
+			Code:    "SAVE_SHARE_ERROR",
+			Message: fmt.Sprintf("failed to save share files: %v", err),
+		}
+	}
+
+	// 构建返回数据
+	data := map[string]interface{}{
+		"pwd_id":    shareInfo.PwdID,
+		"dest_dir":  destDir,
+		"dest_fid":  toPdirFid,
+		"save_all":  true,
+		"save_data": result,
+	}
+
+	return &CLIResult{
+		Success: true,
+		Code:    "OK",
+		Message: "Share files saved successfully",
+		Data:    data,
+	}
+}

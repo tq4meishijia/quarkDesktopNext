@@ -1,0 +1,12 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "kuake-desktop",
+  "outputfilename": "kuake-desktop",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev": "",
+  "author": {
+    "name": "kuake-desktop",
+    "email": ""
+  }
+}

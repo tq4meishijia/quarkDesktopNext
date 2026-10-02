@@ -1,0 +1,123 @@
+NOTICE
+======
+
+quarkDesktopNext —— 夸克网盘桌面客户端
+Copyright (c) 2026 tq4meishijia
+仓库地址：https://github.com/tq4meishijia/quarkDesktopNext
+
+本文件依据各第三方依赖的许可证要求（尤其是 Apache-2.0 依赖对 NOTICE 留存的
+要求）编制，用于声明版权归属、上游来源与第三方许可证清单。
+
+
+一、本仓库的构成与版权
+-------------------------------------------------------------------------------
+1. 仓库根目录（桌面端主工程）
+   - 范围：main.go、app/、internal/、frontend/、scripts/、wails.json、go.mod 等
+   - 版权：(c) 2026 tq4meishijia
+   - 许可证：MIT（见根目录 LICENSE）
+
+2. quark-cil/ 子目录（上游项目，未作修改）
+   - 上游仓库：https://github.com/zhangjingwei/kuake_cli
+   - 版权：归上游作者 zhangjingwei 所有
+   - 许可证：GNU Affero General Public License v3.0（AGPL-3.0）
+             许可证全文见 quark-cil/LICENSE
+   - 说明：本目录为上游源码原样随仓库分发，仅用于满足 go.mod 中的
+           `replace github.com/zhangjingwei/kuake_cli => ./quark-cil`
+           请保留其内部的版权与许可证声明，不要剥离。
+
+
+二、许可证兼容性结论（重要）
+-------------------------------------------------------------------------------
+本工程桌面端源码以 MIT 授权，但其编译期链接了 quark-cil/ 中的 AGPL-3.0 代码。
+据此，兼容性结论如下：
+
+  * 允许的（MIT / BSD / ISC / Apache-2.0 依赖）：
+    宽松许可证依赖全部兼容。MIT、BSD-2-Clause、BSD-3-Clause、ISC 均为宽松型
+    许可证，可自由并入本工程；Apache-2.0 依赖亦兼容，但要求保留其 NOTICE 与
+    专利条款声明——本文件即为该要求的落实。
+
+  * 需要特别遵守的（AGPL-3.0 依赖）：
+    AGPL-3.0 具有强 copyleft 及网络交互条款（第 13 条）。MIT 属宽松许可证，
+    单向兼容于 AGPL（MIT 代码可被并入 AGPL 作品），但反向不成立：**不能将
+    包含 AGPL 代码的衍生作品整体以 MIT 授权分发。**
+
+    因此实际约束为：
+      - 单独使用或引用本仓库根目录的桌面端源码时，适用 MIT；
+      - 一旦将根目录源码与 quark-cil/ 一同编译并对外分发（含提供网络服务），
+        该整体分发产物须遵循 AGPL-3.0，包括提供完整对应源码、保留许可证全文、
+        标注对上游代码的修改。
+
+    本仓库采用「根目录声明 MIT + quark-cil/ 保留 AGPL-3.0」的分层声明方式，
+    即以 MIT 授权自有代码、同时完整保留上游的 AGPL-3.0 约束。使用者在分发
+    二进制产物时，应以 AGPL-3.0 为准。
+
+
+三、第三方依赖许可证清单
+-------------------------------------------------------------------------------
+以下许可证信息取自各依赖模块分发包内的 LICENSE 文件（go module 缓存）或
+上游仓库 LICENSE 原文，版本与本仓库 go.mod / quark-cil/go.mod 中锁定的版本一致。
+
+A. 桌面端模块（根目录 go.mod）
+
+  依赖                                     版本          许可证
+  ---------------------------------------  ------------  ---------------------
+  github.com/wailsapp/wails/v2              v2.10.2       MIT
+  github.com/wailsapp/go-webview2           v1.0.19       MIT
+  github.com/wailsapp/mimetype              v1.4.1        MIT
+  github.com/labstack/echo/v4               v4.13.3       MIT
+  github.com/labstack/gommon                v0.4.2        MIT
+  github.com/leaanthony/go-ansi-parser      v1.6.1        MIT
+  github.com/leaanthony/gosod               v1.0.4        MIT
+  github.com/leaanthony/slicer              v1.6.0        MIT
+  github.com/leaanthony/u                   v1.1.1        MIT
+  github.com/samber/lo                      v1.49.1       MIT
+  github.com/bep/debounce                   v1.2.1        MIT
+  github.com/mattn/go-colorable             v0.1.13       MIT
+  github.com/mattn/go-isatty                v0.0.20       MIT
+  github.com/rivo/uniseg                    v0.4.7        MIT
+  github.com/go-ole/go-ole                  v1.3.0        MIT
+  github.com/pkg/browser                    20240102      MIT
+  github.com/valyala/bytebufferpool         v1.0.0        MIT
+  github.com/valyala/fasttemplate           v1.2.2        MIT
+  github.com/tkrajina/go-reflector          v0.5.8        Apache-2.0
+  github.com/google/uuid                    v1.6.0        BSD-3-Clause
+  github.com/gorilla/websocket              v1.5.3        BSD-2-Clause
+  github.com/godbus/dbus/v5                 v5.1.0        BSD-2-Clause
+  github.com/pkg/errors                     v0.9.1        BSD-2-Clause
+  github.com/jchv/go-winloader              20210711      ISC
+  golang.org/x/{crypto,net,sys,text}        —             BSD-3-Clause
+  github.com/zhangjingwei/kuake_cli         —             AGPL-3.0（本地 replace
+                                                          至 ./quark-cil）
+
+B. quark-cil 模块（quark-cil/go.mod）
+
+  依赖                                     版本          许可证
+  ---------------------------------------  ------------  ---------------------
+  github.com/joho/godotenv                  v1.5.1        MIT
+  github.com/mark3labs/mcp-go               v0.54.0       MIT
+  github.com/google/jsonschema-go           v0.4.2        MIT
+  github.com/spf13/cast                     v1.7.1        MIT
+  github.com/santhosh-tekuri/jsonschema/v6  v6.0.2        Apache-2.0
+  github.com/yosida95/uritemplate/v3        v3.0.2        BSD-3-Clause
+  github.com/google/uuid                    v1.6.0        BSD-3-Clause
+  golang.org/x/text                         v0.14.0       BSD-3-Clause
+
+所有 MIT / BSD-2-Clause / BSD-3-Clause / ISC / Apache-2.0 依赖均为 OSI 认证的
+开源许可证，彼此之间以及与本工程根目录的 MIT 声明兼容；其中 Apache-2.0 依赖
+要求保留其 NOTICE 与专利条款，已由本文件满足。
+
+
+四、Apache-2.0 依赖的补充声明
+-------------------------------------------------------------------------------
+本仓库使用了 Apache-2.0 许可的依赖（github.com/tkrajina/go-reflector、
+github.com/santhosh-tekuri/jsonschema/v6）。依据 Apache-2.0 第 4 条，
+上述依赖随其各自的 LICENSE 与 NOTICE 文件原样分发，本仓库未对其源码作出修改，
+亦未以其名义作出任何背书或保证。
+
+
+五、免责声明
+-------------------------------------------------------------------------------
+本项目为第三方网盘客户端的开源实现，与所访问网盘服务的运营方无任何隶属、
+授权或背书关系。使用本项目即表示您同意自行承担相应风险，并确保自身行为
+符合所适用法律法规及对应网盘服务的用户协议。
+上游项目的免责声明另见 quark-cil/docs/DISCLAIMER.md。

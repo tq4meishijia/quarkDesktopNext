@@ -1,0 +1,203 @@
+/* ============================================================
+   theme.css —— 设计令牌与主题定义
+   所有颜色、圆角、间距、动效都收敛到这里，组件样式只引用变量。
+   主题通过 <html data-theme="light|dark"> 切换，由 core/theme 应用。
+   ============================================================ */
+
+:root {
+  /* 圆角：三档，全站统一，不再出现第四种值 */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 18px;
+
+  /* 间距：4px 基准 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* 字号 */
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 26px;
+
+  /* 字体 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* 动效 */
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* 层级 */
+  --z-sticky: 10;
+  --z-modal: 100;
+  --z-toast: 200;
+}
+
+/* ---------- 浅色主题 ---------- */
+:root[data-theme="light"] {
+  --bg: #f5f6f8;
+  --bg-app: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --surface-3: #e8ebef;
+  --surface-hover: #f2f4f7;
+  --surface-active: #e9edf5;
+
+  --border: #e2e6ea;
+  --border-strong: #cfd5dc;
+
+  --text: #14171a;
+  --text-2: #56606d;
+  --text-3: #8b95a1;
+
+  --accent: #3b6cff;
+  --accent-hover: #2f5ceb;
+  --accent-soft: rgba(59, 108, 255, 0.1);
+  --accent-border: rgba(59, 108, 255, 0.32);
+  --on-accent: #ffffff;
+
+  --success: #118a5a;
+  --success-soft: rgba(17, 138, 90, 0.12);
+  --warn: #b96f06;
+  --warn-soft: rgba(185, 111, 6, 0.14);
+  --danger: #d63c42;
+  --danger-soft: rgba(214, 60, 66, 0.12);
+
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow: 0 2px 6px rgba(16, 24, 40, 0.07), 0 12px 28px rgba(16, 24, 40, 0.06);
+  --shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.12), 0 24px 64px rgba(16, 24, 40, 0.12);
+
+  --scrollbar-thumb: #cfd5dc;
+  --scrollbar-thumb-hover: #b6bdc6;
+
+  --skeleton: linear-gradient(90deg, #eceef1 25%, #f5f6f8 37%, #eceef1 63%);
+}
+
+/* ---------- 暗色主题 ---------- */
+:root[data-theme="dark"] {
+  --bg: #0f1115;
+  --bg-app: #0f1115;
+  --surface: #171a21;
+  --surface-2: #1d212a;
+  --surface-3: #242935;
+  --surface-hover: #21262f;
+  --surface-active: #293140;
+
+  --border: #272c36;
+  --border-strong: #39404e;
+
+  --text: #e7eaee;
+  --text-2: #a3acba;
+  --text-3: #6e7785;
+
+  --accent: #6d8dff;
+  --accent-hover: #829dff;
+  --accent-soft: rgba(109, 141, 255, 0.16);
+  --accent-border: rgba(109, 141, 255, 0.4);
+  --on-accent: #0f1115;
+
+  --success: #3ecf8e;
+  --success-soft: rgba(62, 207, 142, 0.14);
+  --warn: #f0b357;
+  --warn-soft: rgba(240, 179, 87, 0.15);
+  --danger: #f56b6f;
+  --danger-soft: rgba(245, 107, 111, 0.14);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.35), 0 14px 34px rgba(0, 0, 0, 0.32);
+  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.45), 0 28px 70px rgba(0, 0, 0, 0.4);
+
+  --scrollbar-thumb: #333a46;
+  --scrollbar-thumb-hover: #454e5d;
+
+  --skeleton: linear-gradient(90deg, #1c2029 25%, #262c37 37%, #1c2029 63%);
+}
+
+/* 跟随系统：data-theme="system" 时由 prefers-color-scheme 决定实际取值。
+   前端在启动时会把 system 解析成 light/dark 再写到 data-theme，
+   这里保留一份兜底，防止 JS 未执行时页面无配色。 */
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --text: #14171a;
+    --border: #e2e6ea;
+  }
+}
+
+/* ---------- 基础重置 ---------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* 主题切换时给一次整体过渡，但排除会引发性能问题的元素 */
+body,
+.app-shell,
+.sidebar,
+.topbar,
+.card {
+  transition: background-color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+/* 尊重系统「减少动效」设置 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,69 @@
+# Git 配置文件
+push.sh
+
+# 配置文件（包含敏感信息）
+config.json
+
+# 本地环境变量文件（可能含 KUAKE_COOKIE 等敏感信息）
+.env
+.env.*
+!.env.example
+
+# 编译文件和构建产物（通过 GitHub Release 发布，不提交到仓库）
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+kuake_sdk
+kuake_sdk_local
+kuake_sdk_quark
+kuake_cli
+kuake_cli_local
+kuake_cli_quark
+kuake
+main
+dist/
+
+# 测试文件
+*.test
+*.out
+test_*.go
+test_*.bin
+test_*.txt
+
+# 下载的文件
+downloaded_*.txt
+
+# 存储目录
+storage/
+
+# IDE
+.vscode/
+.claude/
+.github/prompts/
+.github/skills/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+RELEASE.md
+RELEASE_NOTES_*.md
+.kuake-release-notes-*.md
+/release.yml
+cmd/config.json
+tip.txt
+
+# 本地问题/回归笔记（不纳入版本库）
+buglist.txt
+
+# Local MCP server config (may contain KUAKE_COOKIE)
+.mcp.json
+
+# Worktrees
+.worktrees/
+worktrees/

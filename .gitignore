@@ -1,0 +1,63 @@
+# 构建产物
+build/
+build/bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.syso
+resources_*.syso
+
+# 依赖与临时文件
+node_modules/
+.DS_Store
+Thumbs.db
+
+# ---- 安全：本地配置与凭证（严禁提交）----
+.env
+.env.*
+!.env.example
+.mcp.json
+config.json
+credentials.json
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# 本地脚本与笔记（不纳入版本库）
+push.sh
+tip.txt
+buglist.txt
+RELEASE.md
+RELEASE_NOTES_*.md
+.kuake-release-notes-*.md
+/release.yml
+
+# 测试与调试产物
+*.test
+*.out
+coverage.out
+coverage.html
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 自举 Go 工具链（体积巨大，不纳入版本库）
+toolchain/
+
+# 下载与运行时产物
+downloaded_*.txt
+storage/
+
+# 说明：
+#   quark-cil/ 为随仓库分发的上游源码，必须纳入版本控制，故本文件不忽略该目录。
+#   quark-cil/ 内部另有其自身的 .gitignore（沿用上游规则，保持不变）。
