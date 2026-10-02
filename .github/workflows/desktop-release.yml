@@ -156,13 +156,21 @@ jobs:
       - name: 构建 ${{ matrix.goos }}/${{ matrix.goarch }}
         id: compile
         if: steps.preflight.outputs.skip != 'true'
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           NAME="${{ env.PROJECT }}-${{ needs.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          wails build -platform "${{ matrix.goos }}/${{ matrix.goarch }}" -trimpath -ldflags "-s -w" -o "$NAME"
+
+          # Ubuntu 24.04 只提供 webkit2gtk-4.1，而 Wails v2 默认按 4.0 走 pkg-config，
+          # 不加这个标签会报 "Package 'webkit2gtk-4.0' ... not found" 导致编译失败。
+          TAGS=""
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            TAGS="-tags webkit2_41"
+          fi
+
+          # shellcheck disable=SC2086
+          wails build $TAGS -platform "${{ matrix.goos }}/${{ matrix.goarch }}" -trimpath -ldflags "-s -w" -o "$NAME"
           ls -la build/bin/
 
       # ---------------------------------------------------------------
