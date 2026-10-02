@@ -29,10 +29,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: |
@@ -76,10 +76,10 @@ jobs:
       run:
         working-directory: quark-cil
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: |
@@ -95,12 +95,18 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # 说明：internal/guard 的部分用例依赖操作系统权限语义，在以管理员/root
-      # 权限执行时会出现与权限相关的既有失败（与本次目录重构无关），
-      # 因此在 Windows 运行器上不将其作为阻断项。
+      # 说明：上游 internal/guard 中 TestCheckUploadLocalPath_SystemPaths 与
+      # TestCheckUploadLocalPath_SymlinkEscape 两个用例依赖 POSIX 路径语义
+      # （/etc/*、/proc/* 与符号链接逃逸检测），在 Windows 上必然失败，
+      # 属运行环境差异而非回归。仅在 Windows 上跳过这两个用例，其余照常执行。
       - name: Test
-        run: go test ./...
-        continue-on-error: ${{ matrix.os == 'windows-latest' }}
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            go test -skip '^TestCheckUploadLocalPath_(SystemPaths|SymlinkEscape)$' ./...
+          else
+            go test ./...
+          fi
 
   # ---------------------------------------------------------------------------
   # 汇总：便于在分支保护中只配置一个必需检查
