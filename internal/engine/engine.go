@@ -48,8 +48,17 @@ const (
 	phUA      = "{ua}"
 )
 
-// UA 是内建与外部下载器统一使用的 User-Agent，与原 HTTP 下载循环保持一致。
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+// UA 是内建与外部下载器统一使用的 User-Agent。
+//
+// 刻意用夸克官方客户端 UA 而非浏览器 UA：OSS 直链按 UA 判定是否施加
+// 大小限制，浏览器 UA 会对大文件返回 23018（"超过文件下载大小限制"），
+// 导致几百 MB 的视频/镜像无法下载。桌面客户端 UA 不受该限制。
+//
+// 形态取自夸克 PC 客户端 2.5.56（Electron 18.3.5.12 / Chromium 100）。
+// 与 sdk.ClientUserAgent 保持一致 —— 同一份直链若 API 请求与下载请求
+// 用不同 UA，容易被判定为环境异常。
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+	"quark-cloud-drive/2.5.56 Chrome/100.0.4896.160 Electron/18.3.5.12 Safari/537.36 Channel/pckk_other_ch"
 
 // Descriptor 是一个外部下载器的静态描述。同一份描述既用于设置页展示，
 // 也用于运行期查找，避免「界面显示的」与「实际执行的」不一致。

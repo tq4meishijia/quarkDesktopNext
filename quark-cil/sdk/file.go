@@ -2807,7 +2807,12 @@ func (qc *QuarkClient) GetDownloadURL(fid string) (string, error) {
 	if err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "23018") || strings.Contains(errStr, "download file size limit") {
-			return "", fmt.Errorf("超过文件下载大小限制，请使用客户端下载")
+			// 正常情况下不应再命中：客户端已改用官方客户端 UA（见 ClientUserAgent），
+			// 服务端不再施加大小限制。仍走到这里说明策略又收紧了，
+			// 此时给出可操作的排查方向，而不是让用户去用"客户端"——
+			// 本工程本身就是客户端，那句提示只会把人引向死路。
+			return "", fmt.Errorf("服务端拒绝了此次下载（错误码 23018，大小限制）；" +
+				"当前已使用客户端 UA，若仍失败可能是夸克收紧了策略或账号等级受限")
 		}
 		return "", fmt.Errorf("download request failed: %w", err)
 	}
@@ -3025,18 +3030,17 @@ func (qc *QuarkClient) DownloadFile(fid, destPath, fileName string, progressCall
 			fmt.Fprintf(os.Stderr, "[调试][DownloadFile] URL 与 API 返回的 download_url 一致（未在客户端拼接或改写 query）\n")
 		}
 	}
-	// 与当前 Chrome 网盘页对齐；OSS 回调会校验 Referer/Cookie 等，与主 API 客户端（强制 HTTP/1.1）分离以免边缘策略差异。
-	const downloadChromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-	req.Header.Set("User-Agent", downloadChromeUA)
+	// 与主 API 客户端一致，用夸克官方客户端 UA：
+	// 浏览器 UA 会让服务端对大文件返回 23018（大小限制），
+	// 且 OSS 直链同样按 UA 判定，必须一起改才能真正下到大文件。
+	req.Header.Set("User-Agent", ClientUserAgent)
 	req.Header.Set("Referer", PAN_DOMAIN+"/")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Priority", "u=0, i")
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="146", "Google Chrome";v="146", "Not_A Brand";v="24"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	// 同 setDefaultAPIHeaders：不发浏览器的 Client Hints 头，避免与 Electron UA 自相矛盾。
 	req.Header.Set("Sec-Fetch-Site", "same-site")
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
 	req.Header.Set("Sec-Fetch-Dest", "iframe")
