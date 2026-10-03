@@ -173,6 +173,10 @@ func (p *persister) writeNow() {
 	if !p.enabled {
 		return
 	}
+	// 注意：以下读取（dirty / path / snapshot）必须在锁内完成。
+	// writeNow 有两个并发来源 —— 去抖协程（loop）与 Stop() 里的同步落盘，
+	// 二者会同时进入；把字段读到锁外会与 close()/mark() 形成数据竞争
+	// （-race 会直接报出来）。
 	p.mu.Lock()
 	if !p.dirty {
 		p.mu.Unlock()
@@ -180,12 +184,14 @@ func (p *persister) writeNow() {
 	}
 	p.dirty = false
 	p.lastWr = time.Now()
+	path := p.path
+	snapshotFn := p.snapshot
 	p.mu.Unlock()
 
-	if p.snapshot == nil {
+	if snapshotFn == nil {
 		return
 	}
-	snapshot := p.snapshot()
+	snapshot := snapshotFn()
 	if snapshot == nil {
 		return
 	}
@@ -193,12 +199,13 @@ func (p *persister) writeNow() {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(p.path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
 	// 原子写：临时文件 + rename，避免崩溃留下半截 JSON
 	// （本项目的 config 包也采用同样做法）。
-	tmp, err := os.CreateTemp(filepath.Dir(p.path), ".transfer-tasks*.tmp")
+	tmp, err := os.CreateTemp(dir, ".transfer-tasks*.tmp")
 	if err != nil {
 		return
 	}
@@ -215,10 +222,10 @@ func (p *persister) writeNow() {
 	if err := tmp.Close(); err != nil {
 		return
 	}
-	if err := os.Rename(tmpName, p.path); err != nil {
+	if err := os.Rename(tmpName, path); err != nil {
 		// Windows 上目标存在时 Rename 会失败，先删再改。
-		if os.Remove(p.path) == nil {
-			_ = os.Rename(tmpName, p.path)
+		if os.Remove(path) == nil {
+			_ = os.Rename(tmpName, path)
 		}
 	}
 }
@@ -228,7 +235,10 @@ func (p *persister) load() []persistedTask {
 	if !p.enabled {
 		return nil
 	}
-	raw, err := os.ReadFile(p.path)
+	p.mu.Lock()
+	path := p.path
+	p.mu.Unlock()
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
