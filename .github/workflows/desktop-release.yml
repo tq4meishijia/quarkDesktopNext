@@ -126,14 +126,22 @@ jobs:
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
+      # 当前只构建 Windows amd64。
+      #
+      # 收敛原因（2026-10-03）：
+      #   * macOS 两平台在「校验版本号已注入」步骤连续 4 次发布失败
+      #     （v1.7.3~v1.7.6），产物本身正常，是该校验步骤对 wails 在
+      #     macOS 上的产物形态判断有误。排查成本高于收益，先收敛到
+      #     能稳定产出的平台。
+      #   * Windows arm64 标为 experimental 且**从未成功产出过**
+      #     （v1.5.0 / v1.6.0 / v1.6.2 / v1.7.2 四个版本均无该资产），
+      #     保留它只会让矩阵里长期挂一个失败项。
+      #
+      # 重新启用其他平台时，把对应条目加回 include 即可，
+      # 各平台的打包与校验逻辑仍保留在脚本里（按 matrix.goos 分支）。
       matrix:
         include:
-          - { os: ubuntu-latest,    goos: linux,   goarch: amd64, label: 'Linux amd64',   experimental: false }
-          - { os: ubuntu-24.04-arm, goos: linux,   goarch: arm64, label: 'Linux arm64',   experimental: false }
-          - { os: macos-latest,     goos: darwin,  goarch: arm64, label: 'macOS arm64',   experimental: false }
-          - { os: macos-15-intel,   goos: darwin,  goarch: amd64, label: 'macOS amd64',   experimental: true  }
           - { os: windows-latest,   goos: windows, goarch: amd64, label: 'Windows amd64', experimental: false }
-          - { os: windows-latest,   goos: windows, goarch: arm64, label: 'Windows arm64', experimental: true  }
 
     steps:
       - name: 检出代码
@@ -158,10 +166,13 @@ jobs:
           cache-dependency-path: |
             go.sum
             quark-cil/go.sum
-
-      # ---------------------------------------------------------------
-      # 预检：补齐系统依赖；明确不支持的组合在此跳过（不算失败）
-      # ---------------------------------------------------------------
+      # ------------------------------------------------------------------
+      # 预检：某些组合在当前 Runner 上根本构建不了，直接标记跳过
+      #
+      # 注意：矩阵当前只有 Windows amd64，下面的 Linux/macOS/Windows-arm64
+      # 分支暂时不会被走到。保留它们是为了将来加回平台时无需重写，
+      # 各分支互不干扰。
+      # ------------------------------------------------------------------      # ---------------------------------------------------------------
       - name: 预检与系统依赖
         id: preflight
         shell: bash
@@ -413,10 +424,11 @@ jobs:
 
             产物说明：
             - Windows：`*windows-amd64.exe`，双击即可运行
-            - Linux：`*linux-*`，下载后需 `chmod +x` 赋予可执行权限
-            - macOS：`*darwin-*.app.zip`，解压后得到 `.app` 包，拖入「应用程序」即可
             - 每个产物都有同名 `.sha256`，运行前请先核对校验和
-            - macOS/amd64 与 Windows/arm64 为实验性组合，Runner 不支持时本次不会产出对应文件
+
+            本版本仅提供 Windows amd64 构建。Linux 与 macOS 的构建脚本
+            仍保留在仓库中（`.github/workflows/desktop-release.yml` 的
+            矩阵 include），需要时加回对应条目即可恢复。
 
             本项目为非官方第三方工具，与夸克网盘官方无关。
           draft: false
