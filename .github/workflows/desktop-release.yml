@@ -239,39 +239,42 @@ jobs:
           EXPECT="${{ needs.version.outputs.version }}"
           echo "期望版本号: $EXPECT"
 
-          # 定位产物。用不带平台分支的通用逻辑 —— 之前假设 macOS 产出
-          # .app 包目录，但 `wails build -o "$NAME"`（NAME 不含 .app）实际产出
-          # 的是与 NAME 同名的**无扩展名可执行文件**，假设错误导致两个 macOS
-          # 平台全部误判失败。
+          # 定位产物。
           #
-          # 兼容两种形态：
-          #   1) build/bin/<NAME>            —— 当前的实际产出（各平台一致）
-          #   2) build/bin/<NAME>.app/Contents/MacOS/<x> —— 若 wails 改为产出包
-          BINS=()
-          EXPECTED="build/bin/${{ steps.compile.outputs.name }}"
-          if [ -f "$EXPECTED" ]; then
-            BINS+=("$EXPECTED")
-          fi
-          if [ -d "$EXPECTED.app" ]; then
-            shopt -s nullglob
-            for f in "$EXPECTED.app"/Contents/MacOS/*; do
-              BINS+=("$f")
-            done
-            shopt -u nullglob
-          fi
-
-          # 兜底：若按名字没找到（wails 可能追加平台后缀），
-          # 退回扫描 build/bin 下的可执行文件。
-          if [ "${#BINS[@]}" -eq 0 ]; then
-            while IFS= read -r f; do
-              BINS+=("$f")
-            done < <(find build/bin -maxdepth 1 -type f ! -name '*.dSYM' ! -name '*.zip')
-          fi
-
-          if [ "${#BINS[@]}" -eq 0 ]; then
-            echo "::error::build/bin 下未找到产物（期望 $EXPECTED）"
-            ls -la build/bin/ || true
-            exit 1
+          # 依据：同一 workflow 里「整理产物与校验和」步骤在 v1.7.2 发布中
+          # 成功过，它的平台分支是事实依据：
+          #   darwin  → find build/bin -name '*.app'（.app 包目录）
+          #   其他     → build/bin/$NAME（无扩展名文件，Windows 为 .exe）
+          # 本步骤必须与之一致，否则会出现「打包能找到、校验找不到」的错配。
+          #
+          # 注意 macOS 分支要用 find 而不是 "$EXPECTED.app"：
+          # wails 产出的 .app 名与 NAME 未必完全一致，用固定路径会漏。
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            BINS=()
+            while IFS= read -r app; do
+              [ -n "$app" ] || continue
+              shopt -s nullglob
+              for f in "$app"/Contents/MacOS/*; do
+                BINS+=("$f")
+              done
+              shopt -u nullglob
+            done < <(find build/bin -maxdepth 1 -name '*.app' -type d)
+            if [ "${#BINS[@]}" -eq 0 ]; then
+              echo "::error::未在 build/bin 下找到 .app 包内的可执行文件"
+              ls -la build/bin/ || true
+              exit 1
+            fi
+          else
+            SRC="build/bin/${{ steps.compile.outputs.name }}"
+            if [ ! -f "$SRC" ]; then
+              SRC="$(find build/bin -maxdepth 1 -type f ! -name '*.dSYM' ! -name '*.zip' -print -quit)"
+            fi
+            if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
+              echo "::error::未在 build/bin 下找到构建产物"
+              ls -la build/bin/ || true
+              exit 1
+            fi
+            BINS=("$SRC")
           fi
 
           # 逐个检查：任一产物含版本号即通过。
