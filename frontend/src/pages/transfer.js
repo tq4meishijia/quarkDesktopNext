@@ -71,7 +71,7 @@ export function transferPage(ctx) {
   function matches(task) {
     const s = task.status || 'pending';
     if (state.filter === 'active') return ACTIVE.has(s);
-    if (state.filter === 'done') return s === 'completed';
+    if (state.filter === 'done') return s === 'completed' || s === 'handedoff';
     if (state.filter === 'failed') return s === 'failed' || s === 'cancelled';
     return true;
   }
@@ -83,7 +83,7 @@ export function transferPage(ctx) {
     for (const t of state.tasks) {
       const s = t.status || 'pending';
       if (ACTIVE.has(s)) active++;
-      if (s === 'completed') done++;
+      if (s === 'completed' || s === 'handedoff') done++;
       if (s === 'running') totalSpeed += t.speed || 0;
     }
     return { active, done, totalSpeed };
@@ -172,6 +172,7 @@ export function transferPage(ctx) {
           onResume: (id) => act(() => api().transfer.resume(id)),
           onCancel: (id) => act(() => api().transfer.cancel(id), '已取消任务'),
           onRetry: (id) => act(() => api().transfer.retry(id), '已重新入队'),
+          onOpen: (id) => act(() => api().transfer.openDest(id)),
         })
       )
     );

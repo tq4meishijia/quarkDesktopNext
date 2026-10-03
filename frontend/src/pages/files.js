@@ -36,6 +36,8 @@ export function filesPage(ctx) {
     searching: false,
     recursive: false,
     reachedCap: false,
+    // 下载时是否保留网盘里的目录层级
+    keepTree: false,
   };
 
   const page = h('div', { class: 'page' });
@@ -193,17 +195,36 @@ export function filesPage(ctx) {
     }
   }
 
-  async function downloadItems(items) {
+  async function downloadItems(items, destDir) {
     if (!items.length) return;
     try {
       await api().transfer.download(
-        items.map((it) => ({ fid: it.fid, name: it.name, size: it.size, remotePath: it.path }))
+        items.map((it) => ({ fid: it.fid, name: it.name, size: it.size, remotePath: it.path })),
+        destDir || '',
+        state.keepTree
       );
       notify.success('已加入下载队列：' + items.length + ' 个文件');
       ctx.go('transfer');
     } catch (err) {
       toastError(err, '下载失败');
     }
+  }
+
+  /**
+   * 「下载到…」：先让用户选目录，选完再入队。
+   * 取消选择时不入队——用户按 Esc 的意图是「先别下」，不是「下载到默认目录」。
+   */
+  async function downloadItemsTo(items) {
+    if (!items.length) return;
+    let dir;
+    try {
+      dir = await api().transfer.pickDir();
+    } catch (err) {
+      toastError(err, '打开目录选择失败');
+      return;
+    }
+    if (!dir) return;
+    await downloadItems(items, dir);
   }
 
   async function renameItem(item) {
@@ -321,6 +342,12 @@ export function filesPage(ctx) {
       show: (item) => !item.isDir,
       onClick: (item) => downloadItems([item]),
     },
+    {
+      icon: 'folder',
+      title: '下载到指定目录',
+      show: (item) => !item.isDir,
+      onClick: (item) => downloadItemsTo([item]),
+    },
     { icon: 'link', title: '创建分享', onClick: (item) => shareItem(item) },
     { icon: 'pencil', title: '重命名', onClick: (item) => renameItem(item) },
     { icon: 'trash', title: '删除', onClick: (item) => removeItems([item]) },
@@ -410,6 +437,18 @@ export function filesPage(ctx) {
           {
             class: 'btn btn--sm',
             type: 'button',
+            disabled: hasDir,
+            title: hasDir ? '文件夹需要打包后才能下载，暂不支持' : '选择目录后再下载',
+            onClick: () => downloadItemsTo(sel.filter((it) => !it.isDir)),
+          },
+          icon('folder', 15),
+          h('span', { text: '下载到…' })
+        ),
+        h(
+          'button',
+          {
+            class: 'btn btn--sm',
+            type: 'button',
             disabled: sel.length !== 1,
             onClick: () => renameItem(sel[0]),
           },
@@ -478,6 +517,19 @@ export function filesPage(ctx) {
         h('span', { text: '上一级' })
       ),
       h('span', { class: 'toolbar__spacer' }),
+      h(
+        'button',
+        {
+          class: 'btn btn--sm' + (state.keepTree ? ' btn--primary' : ''),
+          type: 'button',
+          title: '下载时在本地按网盘目录层级建子目录',
+          text: state.keepTree ? '保留目录结构' : '扁平存放',
+          onClick: () => {
+            state.keepTree = !state.keepTree;
+            render();
+          },
+        }
+      ),
       h(
         'div',
         { class: 'segmented', role: 'tablist', 'aria-label': '视图切换' },

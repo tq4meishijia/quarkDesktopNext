@@ -33,6 +33,7 @@ id_ed25519*
 push.sh
 tip.txt
 buglist.txt
+docs/FEATURE-IMPL-PROMPT.md
 RELEASE.md
 RELEASE_NOTES_*.md
 .kuake-release-notes-*.md

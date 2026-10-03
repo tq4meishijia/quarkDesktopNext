@@ -8,7 +8,7 @@
 import { h } from '../core/dom.js';
 import { icon } from '../core/icons.js';
 import { bridge, bridgeMode } from '../bridge/index.js';
-import { toastError } from '../components/toast.js';
+import { notify, toastError } from '../components/toast.js';
 
 const STEPS = [
   '用浏览器打开 pan.quark.cn 并完成登录',
@@ -40,27 +40,95 @@ export function loginPage({ onSuccess }) {
   const renderStatus = (st) => {
     if (!st) return;
     const waiting = st.phase === 'waiting';
+    const capturing = st.phase === 'capturing';
+    const failed = st.phase === 'error' || st.phase === 'cancelled';
     statusBox.classList.remove('hidden');
     statusBox.innerHTML = '';
     statusBox.appendChild(
       h(
         'div',
         { class: 'login__interactive-row' },
-        waiting ? h('span', { class: 'spinner spinner--sm' }) : h('span', { class: 'dot dot--' + (st.phase === 'success' ? 'ok' : 'warn') }),
+        waiting || capturing ? h('span', { class: 'spinner spinner--sm' }) : h('span', { class: 'dot dot--' + (st.phase === 'success' ? 'ok' : 'warn') }),
         h('span', { class: 'login__interactive-text', text: st.hint || '' })
       )
     );
-    if (st.url) {
-      statusBox.appendChild(
-        h('div', { class: 'login__interactive-url', text: st.url })
-      );
+
+    // 进度细节：已收到的 Cookie 条数 + 剩余时间。
+    // 没有这两项时用户只能对着一个不动的转圈等，误以为卡住了。
+    const detail = [];
+    if (st.collected > 0) detail.push('已收到 ' + st.collected + ' 项凭证');
+    if (waiting && st.remaining > 0) {
+      const m = Math.floor(st.remaining / 60);
+      const sec = st.remaining % 60;
+      detail.push('剩余 ' + (m > 0 ? m + ' 分 ' : '') + sec + ' 秒');
     }
-    if (waiting) {
+    if (detail.length) {
+      statusBox.appendChild(h('div', { class: 'login__interactive-meta', text: detail.join(' · ') }));
+    }
+
+    if (st.url) {
+      const urlBox = h('div', { class: 'login__interactive-url', text: st.url });
+      statusBox.appendChild(urlBox);
+      if (failed || waiting) {
+        // 浏览器没自动弹出、或被误关时，给一个手动兜底
+        statusBox.appendChild(
+          h(
+            'div',
+            { class: 'row', style: { gap: 'var(--sp-2)' } },
+            h(
+              'button',
+              {
+                class: 'btn btn--sm',
+                type: 'button',
+                title: '复制登录地址',
+                onClick: async () => {
+                  try {
+                    await navigator.clipboard.writeText(st.url);
+                    notify.success('登录地址已复制，粘贴到浏览器打开即可');
+                  } catch (err) {
+                    notify.warn('复制失败，请手动选中上方地址');
+                  }
+                },
+              },
+              icon('copy', 15),
+              h('span', { text: '复制地址' })
+            ),
+            h(
+              'button',
+              {
+                class: 'btn btn--sm',
+                type: 'button',
+                onClick: async () => {
+                  try {
+                    await bridge().auth.interactiveReopen();
+                  } catch (err) {
+                    toastError(err, '无法打开浏览器');
+                  }
+                },
+              },
+              icon('monitor', 15),
+              h('span', { text: '重新打开浏览器' })
+            )
+          )
+        );
+      }
+    }
+
+    if (waiting || capturing) {
       statusBox.appendChild(
         h(
           'button',
           { class: 'btn btn--sm', type: 'button', onClick: () => doCancel() },
           h('span', { text: '取消' })
+        )
+      );
+    } else if (failed) {
+      statusBox.appendChild(
+        h(
+          'button',
+          { class: 'btn btn--sm btn--primary', type: 'button', onClick: () => beginInteractive() },
+          icon('retry', 15),
+          h('span', { text: '重新登录' })
         )
       );
     }
@@ -126,15 +194,21 @@ export function loginPage({ onSuccess }) {
   const beginInteractive = async () => {
     clearError();
     interactiveBtn.disabled = true;
+    renderStatus({ phase: 'waiting', hint: '正在启动本地登录代理…', url: '', collected: 0, remaining: 0 });
     try {
       const st = await bridge().auth.interactiveStart();
       renderStatus(st);
       if (st.active) {
+        clearInterval(pollTimer);
         pollTimer = setInterval(async () => {
-          const cur = await bridge().auth.interactiveStatus();
-          renderStatus(cur);
-          if (!cur.active) clearInterval(pollTimer);
-        }, 900);
+          try {
+            const cur = await bridge().auth.interactiveStatus();
+            renderStatus(cur);
+            if (!cur.active) clearInterval(pollTimer);
+          } catch (err) {
+            // 单次轮询失败不该中断整个流程，下一拍再试
+          }
+        }, 700);
       } else {
         interactiveBtn.disabled = false;
       }
@@ -152,7 +226,14 @@ export function loginPage({ onSuccess }) {
     } finally {
       interactiveBtn.disabled = false;
     }
-    renderStatus({ active: false, phase: 'cancelled', hint: '已取消登录，可重新点击上方按钮。', url: '' });
+    renderStatus({
+      active: false,
+      phase: 'cancelled',
+      hint: '已取消登录，可重新点击上方按钮。',
+      url: '',
+      collected: 0,
+      remaining: 0,
+    });
   };
 
   submitBtn.addEventListener('click', () => doLogin(input.value, 'manual'));
@@ -183,6 +264,20 @@ export function loginPage({ onSuccess }) {
       text: '本客户端是非官方第三方工具，不提供账号密码登录，也不上传你的凭证到任何服务器：Cookie 只保存在本机配置目录，权限 0600。',
     }),
 
+    // 交互式登录是主路径：一条命令完成，不需要碰开发者工具
+    h(
+      'div',
+      { class: 'col', style: { gap: 'var(--sp-2)' } },
+      interactiveBtn,
+      h('div', {
+        class: 'field__hint',
+        text: '会在本机临时启动一个只代理 quark.cn 的地址并自动打开浏览器，登录成功后凭证自动保存、代理随即关闭；密码只经过浏览器与夸克，不会经过本客户端。',
+      })
+    ),
+    statusBox,
+
+    h('div', { class: 'login__divider' }, h('span', { text: '或使用 Cookie 手动登录' })),
+
     h(
       'div',
       { class: 'field' },
@@ -196,11 +291,6 @@ export function loginPage({ onSuccess }) {
           : '凭证会写入本机配置文件；也可设置 KUAKE_COOKIE 后用下方按钮直接读取。',
       })
     ),
-
-    h('div', { class: 'col', style: { gap: 'var(--sp-2)' } }, interactiveBtn),
-    statusBox,
-
-    h('div', { class: 'login__divider' }, h('span', { text: '或使用 Cookie 手动登录' })),
     h('div', { class: 'col', style: { gap: 'var(--sp-2)' } }, submitBtn, envBtn),
 
     h(

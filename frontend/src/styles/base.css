@@ -427,6 +427,10 @@
 .progress--paused .progress__bar {
   background: var(--text-3);
 }
+/* 已移交外部下载器：进度不再由本进程掌握，用中性色避免误导 */
+.progress--warn .progress__bar {
+  background: var(--warn);
+}
 
 /* 不确定进度（解析分享等无法量化进度的场景） */
 .progress--indeterminate .progress__bar {
@@ -527,6 +531,12 @@
   width: 26px;
   height: 26px;
   border-width: 3px;
+}
+
+.spinner--sm {
+  width: 13px;
+  height: 13px;
+  border-width: 2px;
 }
 
 @keyframes spin {

@@ -10,18 +10,15 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/zhangjingwei/kuake_cli/sdk"
 
+	"kuake-desktop/internal/engine"
 	"kuake-desktop/internal/transfer"
 )
 
@@ -33,10 +30,11 @@ type DownloadItem struct {
 	RemotePath string `json:"remotePath"`
 }
 
-// 取消/暂停说明（与 README「已知限制」一致）：
-//   - 下载走本文件里的自建 HTTP 循环，暂停与取消都能立即生效；
+// 取消/暂停说明：
+//   - 内建下载器直接消费任务 context 与暂停闸门，暂停/取消都立即生效；
 //   - 上传复用 sdk.UploadFile（秒传、分片、断点续传由 SDK 负责），
-//     但 SDK 的进度回调没有中断钩子，取消会在下一个进度回调边界生效。
+//     但 SDK 的进度回调没有中断钩子，取消会在下一个进度回调边界生效；
+//   - 外部下载器（IDM/迅雷/浏览器等）不受本进程控制，任务会立刻标记为「已移交」。
 
 // sdkRunner 是 transfer.Runner 的实现。
 //
@@ -76,9 +74,9 @@ func (r *sdkRunner) Upload(ctx context.Context, t *transfer.Task, prog transfer.
 
 // Download 实现 transfer.Runner。
 //
-// 这里没有直接用 sdk.DownloadFile，而是用 sdk.GetDownloadURL 拿到直链后自建下载循环，
-// 原因是 GUI 需要真正的暂停/取消能力，而 SDK 的下载循环不接受外部 context。
-// 请求头（UA / Referer / Cookie）与 SDK 保持一致，避免被 OSS 边缘策略拒绝。
+// 走 internal/engine：内建下载器是多连接分片 + 断点续传；选了外部下载器则把直链
+// 交给它并立刻返回 transfer.ErrHandedOff（外部程序不接受外部 context，
+// 继续等待只会让暂停/取消失真）。
 func (r *sdkRunner) Download(ctx context.Context, t *transfer.Task, prog transfer.ProgressFunc) error {
 	qc, err := r.app.requireClient()
 	if err != nil {
@@ -88,97 +86,49 @@ func (r *sdkRunner) Download(ctx context.Context, t *transfer.Task, prog transfe
 	if err != nil {
 		return err
 	}
-	dest := filepath.Join(t.LocalPath, t.Name)
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("创建本地目录失败: %w", err)
+	set := r.app.currentSettings()
+
+	desc, ok := engine.Lookup(set.Downloader)
+	if !ok {
+		return errors.New("未知的下载器：" + set.Downloader)
+	}
+	req := engine.Request{
+		URL:      dlURL,
+		Dest:     t.Dest,
+		Size:     t.Size,
+		Cookie:   cookieHeader(qc.GetCookies()),
+		Referer:  sdk.PAN_DOMAIN + "/",
+		UA:       engine.UA,
+		Segments: set.Segments,
+		Progress: prog,
+		Gate:     func() error { return t.Gate().Wait(ctx) },
 	}
 
-	// 先写 .kuake-part，成功后原子改名，避免中断留下半截文件。
-	part := dest + ".kuake-part"
-	out, err := os.Create(part)
-	if err != nil {
-		return fmt.Errorf("创建本地文件失败: %w", err)
+	if desc.ID == engine.BuiltinID {
+		return (&engine.Native{}).Fetch(ctx, req)
 	}
-	committed := false
-	defer func() {
-		out.Close()
-		if !committed {
-			_ = os.Remove(part)
-		}
-	}()
+	return engine.Run(ctx, desc, engine.Options{
+		Exec:    set.DownloaderExec,
+		Args:    set.DownloaderArgs,
+		CopyURL: r.app.copyToClipboard,
+	}, req)
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
-	if err != nil {
-		return err
+// cookieHeader 把 cookie 字典拼成请求头用的 "a=1; b=2" 形式，键名排序保证可复现。
+func cookieHeader(cookies map[string]string) string {
+	if len(cookies) == 0 {
+		return ""
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-	req.Header.Set("Referer", sdk.PAN_DOMAIN+"/")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
-	req.Header.Set("Cache-Control", "no-cache")
-	if cookies := qc.GetCookies(); len(cookies) > 0 {
-		keys := make([]string, 0, len(cookies))
-		for k := range cookies {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		parts := make([]string, 0, len(keys))
-		for _, k := range keys {
-			parts = append(parts, k+"="+cookies[k])
-		}
-		req.Header.Set("Cookie", strings.Join(parts, "; "))
+	keys := make([]string, 0, len(cookies))
+	for k := range cookies {
+		keys = append(keys, k)
 	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+cookies[k])
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
-	}
-
-	buf := make([]byte, 256*1024)
-	var written int64
-	lastReport := time.Now()
-	for {
-		// 暂停闸门放在读之前：暂停时不再向服务端要数据。
-		if err := t.Gate().Wait(ctx); err != nil {
-			return err
-		}
-		n, rerr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := out.Write(buf[:n]); werr != nil {
-				return werr
-			}
-			written += int64(n)
-			if time.Since(lastReport) >= 200*time.Millisecond {
-				lastReport = time.Now()
-				if perr := prog(written); perr != nil {
-					return perr
-				}
-			}
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return rerr
-		}
-	}
-
-	if perr := prog(written); perr != nil {
-		return perr
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	_ = os.Remove(dest) // Windows 下 Rename 不能覆盖已存在文件
-	if err := os.Rename(part, dest); err != nil {
-		return fmt.Errorf("写入最终文件失败: %w", err)
-	}
-	committed = true
-	return nil
+	return strings.Join(parts, "; ")
 }
 
 // ---------- 前端可直接调用的任务 API ----------
@@ -237,8 +187,10 @@ func (a *App) EnqueueUploads(localPaths []string, remoteDir string) ([]TaskDTO, 
 			Kind:       "upload",
 			Name:       name,
 			LocalPath:  lp,
+			Dest:       lp,
 			RemotePath: joinRemote(dir, name),
 			Size:       st.Size(),
+			Engine:     "内建上传",
 		})
 		out = append(out, taskToDTO(t))
 	}
@@ -248,19 +200,36 @@ func (a *App) EnqueueUploads(localPaths []string, remoteDir string) ([]TaskDTO, 
 	return out, nil
 }
 
-// EnqueueDownloads 把一批网盘文件加入下载队列，落盘目录取设置页的下载路径。
-func (a *App) EnqueueDownloads(items []DownloadItem) ([]TaskDTO, error) {
+// EnqueueDownloads 把一批网盘文件加入下载队列。
+// dir 为空时用设置页的默认下载路径；非空时本次下载落到该目录（界面的「下载到…」）。
+// keepTree 为 true 时按网盘目录层级建子目录。
+func (a *App) EnqueueDownloads(items []DownloadItem, dir string, keepTree bool) ([]TaskDTO, error) {
 	if _, err := a.requireClient(); err != nil {
 		return nil, err
 	}
 	if len(items) == 0 {
 		return nil, errors.New("没有选择文件")
 	}
-	dir := a.currentSettings().DownloadDir
-	if strings.TrimSpace(dir) == "" {
-		dir = "."
+	set := a.currentSettings()
+	base := strings.TrimSpace(dir)
+	if base == "" {
+		base = set.DownloadDir
 	}
+	if strings.TrimSpace(base) == "" {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, "Downloads", "QuarkDrive")
+	}
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return nil, err
+	}
+	desc, ok := engine.Lookup(set.Downloader)
+	if !ok {
+		return nil, errors.New("未知的下载器：" + set.Downloader)
+	}
+
 	out := make([]TaskDTO, 0, len(items))
+	var lastErr error
 	for _, it := range items {
 		if it.Fid == "" {
 			continue
@@ -269,17 +238,32 @@ func (a *App) EnqueueDownloads(items []DownloadItem) ([]TaskDTO, error) {
 		if name == "" {
 			name = it.Fid
 		}
+		target := absBase
+		if keepTree {
+			target = uniqueRemoteDir(absBase, dirOf(it.RemotePath))
+		}
+		dest, derr := resolveDest(target, name, set.SameName)
+		if derr != nil {
+			a.notify("warn", name+"："+derr.Error())
+			lastErr = derr
+			continue
+		}
 		t := a.tm.Enqueue(transfer.Spec{
 			Kind:       "download",
 			Name:       name,
-			LocalPath:  dir,
+			LocalPath:  target,
+			Dest:       dest,
 			RemotePath: it.RemotePath,
 			Fid:        it.Fid,
 			Size:       it.Size,
+			Engine:     desc.Label,
 		})
 		out = append(out, taskToDTO(t))
 	}
 	if len(out) == 0 {
+		if lastErr != nil {
+			return nil, lastErr
+		}
 		return nil, errors.New("没有可下载的文件")
 	}
 	return out, nil
@@ -339,8 +323,7 @@ func (a *App) CancelAllTasks() int { return a.tm.CancelAll() }
 // ClearCompletedTasks 清除已完成/失败/取消的任务。
 func (a *App) ClearCompletedTasks() int { return a.tm.ClearCompleted() }
 
-// RevealLocal 校验本地文件是否存在，供下载完成后「打开所在目录」按钮做前置检查。
-// 真正的唤起文件管理器由前端自行处理，避免 Go 侧引入平台相关的 exec 调用。
+// RevealLocal 校验本地路径存在，供下载完成后「打开所在目录」按钮做前置检查。
 func (a *App) RevealLocal(localPath string) (string, error) {
 	p := strings.TrimSpace(localPath)
 	if p == "" {
@@ -354,4 +337,20 @@ func (a *App) RevealLocal(localPath string) (string, error) {
 		return "", errors.New("文件不存在：" + abs)
 	}
 	return abs, nil
+}
+
+// OpenTaskDest 在系统文件管理器里打开某个下载任务的落盘目录。
+func (a *App) OpenTaskDest(id string) (bool, error) {
+	t, ok := a.tm.Get(id)
+	if !ok {
+		return false, transfer.ErrNotFound
+	}
+	dir := t.Dest
+	if dir == "" {
+		dir = t.LocalPath
+	}
+	if err := a.RevealLocalDir(dir); err != nil {
+		return false, err
+	}
+	return true, nil
 }

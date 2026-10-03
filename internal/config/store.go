@@ -32,6 +32,16 @@ type Settings struct {
 	UploadPolicy string `json:"uploadPolicy"`
 	// StartMinimized 启动时是否最小化到托盘。
 	StartMinimized bool `json:"startMinimized"`
+	// Downloader 下载器 ID：builtin（内建）或注册表里的外部下载器。
+	Downloader string `json:"downloader"`
+	// DownloaderExec 外部下载器可执行文件路径，留空表示自动探测。
+	DownloaderExec string `json:"downloaderExec"`
+	// DownloaderArgs 外部下载器参数模板 JSON 数组，留空表示用内置模板。
+	DownloaderArgs []string `json:"downloaderArgs"`
+	// Segments 内建下载器的分片并发数（1-16）。
+	Segments int `json:"segments"`
+	// SameName 同名文件策略：rename（自动加序号，默认）/ overwrite / skip。
+	SameName string `json:"sameName"`
 }
 
 // Credentials 保存当前会话凭证的来源与原始 Cookie 串。
@@ -75,6 +85,9 @@ func defaults() Settings {
 		Concurrency:  3,
 		Theme:        "system",
 		UploadPolicy: "skip",
+		Downloader:   "builtin",
+		Segments:     4,
+		SameName:     "rename",
 	}
 }
 
@@ -116,6 +129,19 @@ func sanitize(v Settings) Settings {
 	case "skip", "overwrite", "rsync":
 	default:
 		v.UploadPolicy = d.UploadPolicy
+	}
+	switch v.SameName {
+	case "rename", "overwrite", "skip":
+	default:
+		v.SameName = d.SameName
+	}
+	// 未识别的下载器一律回落到内建：外部下载器随时可能被卸载，
+	// 坏配置不该让下载功能整体不可用。
+	if v.Downloader == "" {
+		v.Downloader = d.Downloader
+	}
+	if v.Segments < 1 || v.Segments > 16 {
+		v.Segments = d.Segments
 	}
 	return v
 }

@@ -25,7 +25,7 @@ export function Delete(arg1:Array<string>):Promise<number>;
 
 export function DeleteShare(arg1:Array<string>):Promise<boolean>;
 
-export function EnqueueDownloads(arg1:Array<app.DownloadItem>):Promise<Array<app.TaskDTO>>;
+export function EnqueueDownloads(arg1:Array<app.DownloadItem>,arg2:string,arg3:boolean):Promise<Array<app.TaskDTO>>;
 
 export function EnqueueUploads(arg1:Array<string>,arg2:string):Promise<Array<app.TaskDTO>>;
 
@@ -39,6 +39,8 @@ export function InteractiveLoginStatus():Promise<app.InteractiveLoginState>;
 
 export function ListDir(arg1:string):Promise<app.DirListing>;
 
+export function ListDownloaders():Promise<Array<app.DownloaderInfo>>;
+
 export function ListMyShares(arg1:number,arg2:number):Promise<Array<app.MyShareItem>>;
 
 export function ListTasks():Promise<Array<app.TaskDTO>>;
@@ -51,6 +53,10 @@ export function Logout():Promise<boolean>;
 
 export function Move(arg1:string,arg2:string):Promise<boolean>;
 
+export function OpenInteractiveLoginURL():Promise<boolean>;
+
+export function OpenTaskDest(arg1:string):Promise<boolean>;
+
 export function ParseShare(arg1:string):Promise<app.SharePreview>;
 
 export function PauseAllTasks():Promise<number>;
@@ -58,6 +64,8 @@ export function PauseAllTasks():Promise<number>;
 export function PauseTask(arg1:string):Promise<boolean>;
 
 export function PickDownloadDir():Promise<string>;
+
+export function PickDownloaderExec():Promise<string>;
 
 export function PickUploadFiles():Promise<Array<string>>;
 
@@ -72,6 +80,8 @@ export function ResumeTask(arg1:string):Promise<boolean>;
 export function RetryTask(arg1:string):Promise<boolean>;
 
 export function RevealLocal(arg1:string):Promise<string>;
+
+export function RevealLocalDir(arg1:string):Promise<void>;
 
 export function SaveSettings(arg1:config.Settings):Promise<config.Settings>;
 

@@ -25,17 +25,34 @@ const POLICIES = [
   { key: 'rsync', label: '仅覆盖大小不同的同名文件' },
 ];
 
+const SAME_NAME = [
+  { key: 'rename', label: '自动改名（加 (1) 序号，默认）' },
+  { key: 'overwrite', label: '直接覆盖已有文件' },
+  { key: 'skip', label: '跳过并提示' },
+];
+
 const DEFAULTS = {
   downloadDir: '',
   concurrency: 3,
   theme: 'system',
   uploadPolicy: 'skip',
   startMinimized: false,
+  downloader: 'builtin',
+  downloaderExec: '',
+  downloaderArgs: [],
+  segments: 4,
+  sameName: 'rename',
+};
+
+const KIND_TEXT = {
+  process: '由本客户端启动，进度可跟踪',
+  launch: '唤起该程序接管，进度不可跟踪',
+  url: '复制直链并用系统程序打开',
 };
 
 export function settingsPage(ctx) {
   const api = () => bridge();
-  const state = { settings: null, dir: '', loading: true };
+  const state = { settings: null, dir: '', loading: true, downloaders: [] };
 
   const page = h('div', { class: 'page' });
 
@@ -43,9 +60,14 @@ export function settingsPage(ctx) {
     state.loading = true;
     render();
     try {
-      const [s, d] = await Promise.all([api().settings.get(), api().settings.dir()]);
-      state.settings = s || { ...DEFAULTS };
+      const [s, d, list] = await Promise.all([
+        api().settings.get(),
+        api().settings.dir(),
+        api().settings.downloaders(),
+      ]);
+      state.settings = { ...DEFAULTS, ...(s || {}) };
       state.dir = d || '';
+      state.downloaders = list || [];
     } catch (err) {
       state.settings = { ...DEFAULTS };
       toastError(err, '设置加载失败');
@@ -102,8 +124,8 @@ export function settingsPage(ctx) {
     });
 
     return row(
-      '下载路径',
-      '下载的文件默认保存到这个目录；留空时使用系统下载目录下的 QuarkDrive 文件夹。',
+      '默认下载路径',
+      '下载的文件默认保存到这个目录；文件页的「下载到…」可以单次改写它。留空时使用系统下载目录下的 QuarkDrive 文件夹。',
       h(
         'div',
         { class: 'input-group', style: { width: '100%' } },
@@ -124,7 +146,166 @@ export function settingsPage(ctx) {
             },
           },
           icon('folder', 16)
+        ),
+        h(
+          'button',
+          {
+            class: 'btn btn--icon',
+            type: 'button',
+            title: '在文件管理器中打开',
+            onClick: async () => {
+              try {
+                await api().settings.openDir(state.settings.downloadDir || '');
+                notify.success('已在文件管理器中打开');
+              } catch (err) {
+                toastError(err, '打不开该目录');
+              }
+            },
+          },
+          icon('external', 16)
         )
+      )
+    );
+  }
+
+  function sameNameRow() {
+    const select = h(
+      'select',
+      { class: 'select', onChange: (e) => save({ sameName: e.target.value }) },
+      ...SAME_NAME.map((p) =>
+        h('option', {
+          value: p.key,
+          text: p.label,
+          selected: state.settings.sameName === p.key ? 'selected' : null,
+        })
+      )
+    );
+    return row('下载遇到同名文件', '网盘里存在同名文件时怎么处理；默认自动加序号，不会覆盖已有文件。', select);
+  }
+
+  function downloaderRow() {
+    const current = state.settings.downloader || 'builtin';
+    const options = state.downloaders.length
+      ? state.downloaders
+      : [{ id: 'builtin', label: '内建下载器（多线程分片）', ready: true, note: '' }];
+    const select = h(
+      'select',
+      {
+        class: 'select',
+        onChange: (e) => save({ downloader: e.target.value }, '已切换下载器'),
+      },
+      ...options.map((d) =>
+        h('option', {
+          value: d.id,
+          text: d.ready ? d.label : d.label + '（未检测到）',
+          selected: current === d.id ? 'selected' : null,
+        })
+      )
+    );
+
+    const picked = options.find((d) => d.id === current);
+    const desc = picked
+      ? h(
+          'div',
+          { class: 'col', style: { gap: '4px' } },
+          h('div', { class: 'field__hint', text: picked.note || '' }),
+          h('div', {
+            class: 'field__hint',
+            text: KIND_TEXT[picked.kind] || '',
+          }),
+          picked.path && picked.id !== 'builtin'
+            ? h('div', { class: 'field__hint', text: '可执行文件：' + picked.path })
+            : null
+        )
+      : null;
+
+    return row('下载器', '内建下载器无需任何外部程序；也可以交给系统上已安装的 aria2 / IDM / 迅雷等。', h('div', { class: 'col', style: { gap: 'var(--sp-2)', width: '100%' } }, select, desc));
+  }
+
+  function segmentsRow() {
+    if ((state.settings.downloader || 'builtin') !== 'builtin') {
+      return row('分片并发数', '仅内建下载器使用。外部下载器的并发由它自己决定。', h('span', { class: 'field__hint', text: '当前下载器不适用' }));
+    }
+    const value = state.settings.segments || 4;
+    const label = h('span', { class: 'badge badge--accent', text: value + ' 线程' });
+    const slider = h('input', {
+      class: 'slider',
+      type: 'range',
+      min: '1',
+      max: '16',
+      value: String(value),
+      onInput: (e) => {
+        label.textContent = e.target.value + ' 线程';
+      },
+      onChange: (e) => save({ segments: Number(e.target.value) }),
+    });
+    return row(
+      '分片并发数',
+      '把一个文件切成几段同时下载。线程越多对宽带利用率越高，但对服务端与磁盘压力也越大；4 – 8 通常最稳。',
+      h('div', { class: 'col', style: { gap: 'var(--sp-2)', width: '100%' } }, h('div', { class: 'row row--between' }, label, h('span', { class: 'field__hint', text: '1 – 16' })), slider)
+    );
+  }
+
+  function downloaderPathRow() {
+    const current = state.settings.downloader || 'builtin';
+    if (current === 'builtin' || current === 'browser') return null;
+    const input = h('input', {
+      class: 'input input--mono',
+      value: state.settings.downloaderExec || '',
+      placeholder: '留空则自动在 PATH 与常见安装目录中查找',
+      onChange: (e) => save({ downloaderExec: e.target.value.trim() }),
+    });
+    return row(
+      '下载器路径',
+      '外部下载器的可执行文件位置。留空表示自动探测；探测不到时在这里手动指定。',
+      h(
+        'div',
+        { class: 'input-group', style: { width: '100%' } },
+        input,
+        h(
+          'button',
+          {
+            class: 'btn btn--icon',
+            type: 'button',
+            title: '选择可执行文件',
+            onClick: async () => {
+              try {
+                const p = await api().settings.pickExec();
+                if (p) await save({ downloaderExec: p }, '已设置下载器路径');
+              } catch (err) {
+                toastError(err, '选择文件失败');
+              }
+            },
+          },
+          icon('folder', 16)
+        )
+      )
+    );
+  }
+
+  function downloaderArgsRow() {
+    const current = state.settings.downloader || 'builtin';
+    if (current === 'builtin' || current === 'browser') return null;
+    const input = h('input', {
+      class: 'input input--mono',
+      value: (state.settings.downloaderArgs || []).join(' '),
+      placeholder: '{url} {dir} {file} {cookie} {referer} {ua}',
+      onChange: (e) => {
+        const raw = e.target.value.trim();
+        const list = raw ? raw.split(/\s+/).filter(Boolean) : [];
+        save({ downloaderArgs: list });
+      },
+    });
+    const picked = state.downloaders.find((d) => d.id === current);
+    const def = (picked && picked.defaultArgs || []).join(' ');
+    return row(
+      '命令行参数',
+      '留空使用该下载器的内置模板。可用占位符：{url} 直链、{dir} 目标目录、{file} 文件名、{cookie} 登录 Cookie、{referer} Referer、{ua} User-Agent。',
+      h(
+        'div',
+        { class: 'col', style: { gap: '4px', width: '100%' } },
+        input,
+        h('div', { class: 'field__hint', text: '当前内置模板：' + (def || '（无）') })
       )
     );
   }
@@ -231,7 +412,7 @@ export function settingsPage(ctx) {
             onClick: async () => {
               const ok = await confirmDialog({
                 title: '恢复默认设置',
-                message: '将把下载路径、并发数、主题与上传策略恢复为默认值。',
+                message: '将把下载路径、同名策略、下载器、并发数、主题与上传策略恢复为默认值。',
                 confirmText: '恢复默认',
                 danger: true,
               });
@@ -269,12 +450,23 @@ export function settingsPage(ctx) {
         h(
           'div',
           { class: 'card' },
-          h('div', { class: 'card__title', text: '传输' }),
-          h('div', { style: { marginTop: 'var(--sp-2)' } },
+          h('div', { class: 'card__title', text: '下载' }),
+          h(
+            'div',
+            { style: { marginTop: 'var(--sp-2)' } },
             downloadDirRow(),
-            concurrencyRow(),
-            policyRow()
+            sameNameRow(),
+            downloaderRow(),
+            segmentsRow(),
+            downloaderPathRow(),
+            downloaderArgsRow()
           )
+        ),
+        h(
+          'div',
+          { class: 'card' },
+          h('div', { class: 'card__title', text: '传输' }),
+          h('div', { style: { marginTop: 'var(--sp-2)' } }, concurrencyRow(), policyRow())
         ),
         h(
           'div',

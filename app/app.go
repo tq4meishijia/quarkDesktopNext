@@ -211,6 +211,7 @@ func taskToDTO(t *transfer.Task) TaskDTO {
 		Kind:       t.Kind,
 		Name:       t.Name,
 		LocalPath:  t.LocalPath,
+		Dest:       t.Dest,
 		RemotePath: t.RemotePath,
 		Size:       t.Size,
 		Done:       done,
@@ -218,6 +219,7 @@ func taskToDTO(t *transfer.Task) TaskDTO {
 		Status:     string(t.Status()),
 		Speed:      t.Speed(),
 		Error:      t.ErrMsg(),
+		Engine:     t.Engine,
 		CreatedAt:  t.CreatedAt.Unix(),
 		FinishedAt: finished,
 	}

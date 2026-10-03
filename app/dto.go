@@ -17,6 +17,7 @@ package app
 const (
 	PhaseIdle      = "idle"
 	PhaseWaiting   = "waiting"
+	PhaseCapturing = "capturing"
 	PhaseSuccess   = "success"
 	PhaseError     = "error"
 	PhaseCancelled = "cancelled"
@@ -29,6 +30,10 @@ type InteractiveLoginState struct {
 	Phase  string `json:"phase"`
 	Hint   string `json:"hint"`
 	URL    string `json:"url"`
+	// Collected 已捕获的 Cookie 条数，让用户看到确实在推进。
+	Collected int `json:"collected"`
+	// Remaining 距离超时的剩余秒数，前端据此显示倒计时。
+	Remaining int `json:"remaining"`
 }
 
 // AuthState 登录态快照，登录页与侧边栏都消费它。
@@ -75,6 +80,7 @@ type TaskDTO struct {
 	Kind       string  `json:"kind"` // upload | download
 	Name       string  `json:"name"`
 	LocalPath  string  `json:"localPath"`
+	Dest       string  `json:"dest"`
 	RemotePath string  `json:"remotePath"`
 	Size       int64   `json:"size"`
 	Done       int64   `json:"done"`
@@ -82,6 +88,7 @@ type TaskDTO struct {
 	Status     string  `json:"status"`
 	Speed      float64 `json:"speed"` // 字节/秒
 	Error      string  `json:"error"`
+	Engine     string  `json:"engine"`
 	CreatedAt  int64   `json:"createdAt"`
 	FinishedAt int64   `json:"finishedAt"`
 }

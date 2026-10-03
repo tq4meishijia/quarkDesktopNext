@@ -405,3 +405,97 @@ func TestSnapshotShowsProgress(t *testing.T) {
 		t.Error("应当至少收集到一条 Cookie")
 	}
 }
+
+// TestRemainingCountsDown 验证倒计时随时间递减且不为负。
+func TestRemainingCountsDown(t *testing.T) {
+	s, err := Start(90 * time.Second)
+	if err != nil {
+		t.Fatalf("启动会话失败：%v", err)
+	}
+	defer s.Close()
+	if r := s.Remaining(); r < 80 || r > 91 {
+		t.Errorf("剩余秒数应在 90 附近，实际 %d", r)
+	}
+	s.deadline = time.Now().Add(-time.Second)
+	if r := s.Remaining(); r != 0 {
+		t.Errorf("已过期应返回 0，实际 %d", r)
+	}
+}
+
+// TestBannerInjectedIntoHTML 验证被代理的 HTML 页面带上了说明横幅。
+func TestBannerInjectedIntoHTML(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<html><body><div>hi</div></body></html>")
+	}))
+	defer upstream.Close()
+
+	s := newTestSession(t, upstream)
+	res, err := http.Get(s.URL())
+	if err != nil {
+		t.Fatalf("访问失败：%v", err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if !strings.Contains(string(body), "__quark_proxy_banner") {
+		t.Errorf("页面未注入横幅：%s", body)
+	}
+	// 注入点在 <body> 之后，原有内容必须还在
+	if !strings.Contains(string(body), "<div>hi</div>") {
+		t.Errorf("注入横幅破坏了原页面：%s", body)
+	}
+}
+
+// TestDonePageAfterCapture 验证捕获凭证后浏览器拿到收尾页，
+// 而不是代理已关停导致的「无法访问此网站」。
+func TestDonePageAfterCapture(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "__pus", Value: "P", Domain: ".quark.cn", Path: "/"})
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<html><body>login</body></html>")
+	}))
+	defer upstream.Close()
+
+	s := newTestSession(t, upstream)
+	browser := newBrowser(t)
+	base := "http://" + s.ln.Addr().String()
+
+	// 首访问下发凭证，第二次请求才带上 Cookie（与真实浏览器一致）
+	for i := 0; i < 3; i++ {
+		res, err := browser.Get(base + prefix + "/pan.quark.cn/")
+		if err != nil {
+			t.Fatalf("第 %d 次访问失败：%v", i+1, err)
+		}
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		if !s.captured() {
+			continue
+		}
+		break
+	}
+	if _, err := s.Wait(context.Background()); err != nil {
+		t.Fatalf("等待凭证失败：%v", err)
+	}
+
+	res, err := http.Get(base + prefix + "/pan.quark.cn/")
+	if err != nil {
+		t.Fatalf("收尾页访问失败：%v", err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if !strings.Contains(string(body), "登录成功") {
+		t.Errorf("捕获后应返回收尾页，实际：%s", body)
+	}
+}
+
+// TestInjectBannerKeepsNonHTML 验证没有 <body> 的内容不会被改坏。
+func TestInjectBannerKeepsNonHTML(t *testing.T) {
+	in := []byte(`{"a":"https://pan.quark.cn/x"}`)
+	got := string(injectBanner(in))
+	if !strings.Contains(got, "pan.quark.cn") {
+		t.Errorf("无 body 的内容应原样返回：%s", got)
+	}
+	if strings.Contains(got, "__quark_proxy_banner") {
+		t.Error("无 body 时不应注入横幅")
+	}
+}

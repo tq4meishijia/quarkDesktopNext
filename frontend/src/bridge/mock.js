@@ -77,27 +77,36 @@ function seedTasks() {
   return [
     {
       id: 'dl-mock-1', kind: 'download', name: '产品宣传片.mp4',
-      localPath: '', remotePath: '/视频/产品宣传片.mp4',
+      localPath: 'C:/Users/demo/Downloads/QuarkDrive', dest: 'C:/Users/demo/Downloads/QuarkDrive/产品宣传片.mp4',
+      remotePath: '/视频/产品宣传片.mp4',
       size: 734003200, done: 268435456, status: 'running', speed: 9437184,
-      error: '', createdAt: T - 120, finishedAt: 0,
+      error: '', engine: '内建下载器（多线程分片）', createdAt: T - 120, finishedAt: 0,
     },
     {
       id: 'up-mock-1', kind: 'upload', name: '首页设计稿 v3.png',
-      localPath: '', remotePath: '/图片/首页设计稿 v3.png',
+      localPath: 'C:/Users/demo/Desktop/首页设计稿 v3.png', dest: '', remotePath: '/图片/首页设计稿 v3.png',
       size: 12582912, done: 4718592, status: 'running', speed: 2097152,
-      error: '', createdAt: T - 60, finishedAt: 0,
+      error: '', engine: '内建上传', createdAt: T - 60, finishedAt: 0,
     },
     {
       id: 'dl-mock-2', kind: 'download', name: '会议纪要.docx',
-      localPath: '', remotePath: '/文档/会议纪要.docx',
+      localPath: 'C:/Users/demo/Downloads/QuarkDrive', dest: 'C:/Users/demo/Downloads/QuarkDrive/会议纪要.docx',
+      remotePath: '/文档/会议纪要.docx',
       size: 61440, done: 61440, status: 'completed', speed: 0,
-      error: '', createdAt: T - 300, finishedAt: T - 292,
+      error: '', engine: 'aria2', createdAt: T - 300, finishedAt: T - 292,
+    },
+    {
+      id: 'dl-mock-3', kind: 'download', name: '全量代码备份.zip',
+      localPath: 'C:/Users/demo/Downloads/QuarkDrive', dest: 'C:/Users/demo/Downloads/QuarkDrive/全量代码备份.zip',
+      remotePath: '/项目归档/全量代码备份.zip',
+      size: 536870912, done: 0, status: 'handedoff', speed: 0,
+      error: '', engine: '迅雷', createdAt: T - 200, finishedAt: T - 199,
     },
     {
       id: 'up-mock-2', kind: 'upload', name: '全量代码备份.zip',
-      localPath: '', remotePath: '/项目归档/全量代码备份.zip',
+      localPath: 'C:/Users/demo/项目归档/全量代码备份.zip', dest: '', remotePath: '/项目归档/全量代码备份.zip',
       size: 536870912, done: 125829120, status: 'failed', speed: 0,
-      error: '连接被重置（模拟故障）', createdAt: T - 420, finishedAt: T - 400,
+      error: '连接被重置（模拟故障）', engine: '内建上传', createdAt: T - 420, finishedAt: T - 400,
     },
   ];
 }
@@ -108,7 +117,26 @@ const DEFAULT_SETTINGS = {
   theme: 'dark',
   uploadPolicy: 'skip',
   startMinimized: false,
+  downloader: 'builtin',
+  downloaderExec: '',
+  downloaderArgs: [],
+  segments: 4,
+  sameName: 'rename',
 };
+
+// 预览模式下的下载器清单，与真实后端 registry 保持同样的字段。
+const MOCK_DOWNLOADERS = [
+  { id: 'builtin', label: '内建下载器（多线程分片）', note: '纯 Go 实现，支持分片并发与断点续传。', kind: 'process', path: 'builtin', ready: true, defaultArgs: [] },
+  { id: 'aria2c', label: 'aria2', note: '需要本机已安装 aria2。', kind: 'process', path: '', ready: false, defaultArgs: ['{url}'] },
+  { id: 'wget', label: 'Wget', note: '类 Unix 环境常见。', kind: 'process', path: '', ready: false, defaultArgs: ['{url}'] },
+  { id: 'curl', label: 'cURL', note: '几乎所有系统自带。', kind: 'process', path: '', ready: false, defaultArgs: ['{url}'] },
+  { id: 'idm', label: 'Internet Download Manager', note: '唤起 IDM 接管下载。', kind: 'launch', path: '', ready: false, defaultArgs: ['{url}'] },
+  { id: 'thunder', label: '迅雷', note: '唤起迅雷接管下载。', kind: 'launch', path: '', ready: false, defaultArgs: ['{url}'] },
+  { id: 'motrix', label: 'Motrix', note: '唤起 Motrix 接管下载。', kind: 'launch', path: '', ready: false, defaultArgs: ['{url}'] },
+  { id: 'fdm', label: 'Free Download Manager', note: '唤起 FDM 接管下载。', kind: 'launch', path: '', ready: false, defaultArgs: ['{url}'] },
+  { id: 'jdownloader', label: 'JDownloader', note: '唤起 JDownloader 接管下载。', kind: 'launch', path: '', ready: false, defaultArgs: ['{url}'] },
+  { id: 'browser', label: '系统浏览器', note: '复制直链并用默认浏览器打开。', kind: 'url', path: '', ready: true, defaultArgs: ['{url}'] },
+];
 
 function loadSettings() {
   try {
@@ -132,8 +160,9 @@ export function createMockBridge() {
   let auth = { loggedIn: false, source: '', masked: '', message: '未登录', profile: null };
   let seq = 200;
   // 交互式登录的模拟状态与定时器
-  let interactive = { active: false, phase: 'idle', hint: '', url: '' };
+  let interactive = { active: false, phase: 'idle', hint: '', url: '', collected: 0, remaining: 0 };
   let interactiveTimer = null;
+  let interactiveTimer2 = null;
 
   const reindex = () => {
     fidIndex.clear();
@@ -230,11 +259,16 @@ export function createMockBridge() {
       // 预览模式下没有真实网盘，用一段可预期的等待过程演示交互：
       // 启动 -> 等待中 -> 自动登录成功，以便完整走通界面流程。
       interactiveStart: async () => {
-        interactive = { active: true, phase: 'waiting', hint: '预览模式：正在模拟浏览器登录…', url: 'https://pan.quark.cn' };
+        interactive = { active: true, phase: 'waiting', hint: '预览模式：正在模拟浏览器登录…', url: 'https://pan.quark.cn', collected: 0, remaining: 300 };
         if (interactiveTimer) clearTimeout(interactiveTimer);
         interactiveTimer = setTimeout(() => {
           interactiveTimer = null;
-          interactive = { active: false, phase: 'success', hint: '预览模式：已模拟登录成功', url: '' };
+          interactive = { active: false, phase: 'capturing', hint: '已捕获凭证，正在校验…', url: '', collected: 6, remaining: 0 };
+        }, 1200);
+        if (interactiveTimer2) clearTimeout(interactiveTimer2);
+        interactiveTimer2 = setTimeout(() => {
+          interactiveTimer2 = null;
+          interactive = { active: false, phase: 'success', hint: '预览模式：已模拟登录成功', url: '', collected: 6, remaining: 0 };
           auth = {
             loggedIn: true,
             source: 'interactive',
@@ -261,6 +295,7 @@ export function createMockBridge() {
         interactive = { active: false, phase: 'cancelled', hint: '已取消登录', url: '' };
         return true;
       },
+      interactiveReopen: async () => true,
     },
 
     files: {
@@ -378,20 +413,23 @@ export function createMockBridge() {
         }
         return created;
       },
-      download: async (items) => {
+      download: async (items, dir, keepTree) => {
         const created = [];
+        const base = String(dir || settings.downloadDir || '');
         for (const it of items) {
           const t = {
             id: 'dl-mock-' + ++seq,
             kind: 'download',
             name: it.name || it.fid,
-            localPath: settings.downloadDir || '',
+            localPath: base,
+            dest: base + '/' + (it.name || it.fid),
             remotePath: it.remotePath || '/',
             size: it.size || Math.round((2 + Math.random() * 40) * MB),
             done: 0,
             status: 'pending',
             speed: 0,
             error: '',
+            engine: '内建下载器（多线程分片）',
             createdAt: nowSec(),
             finishedAt: 0,
           };
@@ -472,10 +510,11 @@ export function createMockBridge() {
         const before = tasks.length;
         for (let i = tasks.length - 1; i >= 0; i--) {
           const s = tasks[i].status;
-          if (s === 'completed' || s === 'failed' || s === 'cancelled') tasks.splice(i, 1);
+          if (s === 'completed' || s === 'failed' || s === 'cancelled' || s === 'handedoff') tasks.splice(i, 1);
         }
         return before - tasks.length;
       },
+      openDest: async () => true,
     },
 
     share: {
@@ -547,6 +586,9 @@ export function createMockBridge() {
       },
       dir: async () => '(预览模式) 配置保存在浏览器 localStorage',
       ensureDir: async (d) => d || 'C:/Users/demo/Downloads/QuarkDrive',
+      downloaders: async () => MOCK_DOWNLOADERS.map((d) => ({ ...d })),
+      pickExec: async () => 'C:/Program Files/aria2/aria2c.exe',
+      openDir: async () => true,
     },
 
     on(event, cb) {

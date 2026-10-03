@@ -60,6 +60,8 @@ export async function createWailsBridge() {
       interactiveStart: () => call('StartInteractiveLogin'),
       interactiveStatus: () => call('InteractiveLoginStatus'),
       interactiveCancel: () => ok('CancelInteractiveLogin'),
+      // 浏览器没自动弹出或被误关时，重新要一次登录入口地址
+      interactiveReopen: () => ok('OpenInteractiveLoginURL'),
     },
 
     files: {
@@ -77,7 +79,8 @@ export async function createWailsBridge() {
       pickFiles: () => call('PickUploadFiles'),
       pickDir: () => call('PickDownloadDir'),
       upload: (paths, dir) => call('EnqueueUploads', paths, dir),
-      download: (items) => call('EnqueueDownloads', items),
+      /** dir 传空字符串表示用设置里的默认下载路径；keepTree 保留网盘目录层级。 */
+      download: (items, dir, keepTree) => call('EnqueueDownloads', items, dir || '', !!keepTree),
       list: () => call('ListTasks'),
       pause: (id) => ok('PauseTask', id),
       resume: (id) => ok('ResumeTask', id),
@@ -86,6 +89,7 @@ export async function createWailsBridge() {
       pauseAll: () => call('PauseAllTasks'),
       resumeAll: () => call('ResumeAllTasks'),
       clearCompleted: () => call('ClearCompletedTasks'),
+      openDest: (id) => ok('OpenTaskDest', id),
     },
 
     share: {
@@ -101,6 +105,9 @@ export async function createWailsBridge() {
       save: (s) => call('SaveSettings', s),
       dir: () => call('ConfigDir'),
       ensureDir: (d) => call('EnsureDownloadDir', d),
+      downloaders: () => call('ListDownloaders'),
+      pickExec: () => call('PickDownloaderExec'),
+      openDir: (dir) => ok('RevealLocalDir', dir || ''),
     },
 
     /**

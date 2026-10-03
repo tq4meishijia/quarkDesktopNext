@@ -136,12 +136,38 @@ export namespace app {
 	        this.remotePath = source["remotePath"];
 	    }
 	}
+	export class DownloaderInfo {
+	    id: string;
+	    label: string;
+	    note: string;
+	    kind: string;
+	    path: string;
+	    ready: boolean;
+	    defaultArgs: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DownloaderInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.label = source["label"];
+	        this.note = source["note"];
+	        this.kind = source["kind"];
+	        this.path = source["path"];
+	        this.ready = source["ready"];
+	        this.defaultArgs = source["defaultArgs"];
+	    }
+	}
 	
 	export class InteractiveLoginState {
 	    active: boolean;
 	    phase: string;
 	    hint: string;
 	    url: string;
+	    collected: number;
+	    remaining: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new InteractiveLoginState(source);
@@ -153,6 +179,8 @@ export namespace app {
 	        this.phase = source["phase"];
 	        this.hint = source["hint"];
 	        this.url = source["url"];
+	        this.collected = source["collected"];
+	        this.remaining = source["remaining"];
 	    }
 	}
 	export class MyShareItem {
@@ -301,6 +329,7 @@ export namespace app {
 	    kind: string;
 	    name: string;
 	    localPath: string;
+	    dest: string;
 	    remotePath: string;
 	    size: number;
 	    done: number;
@@ -308,6 +337,7 @@ export namespace app {
 	    status: string;
 	    speed: number;
 	    error: string;
+	    engine: string;
 	    createdAt: number;
 	    finishedAt: number;
 	
@@ -321,6 +351,7 @@ export namespace app {
 	        this.kind = source["kind"];
 	        this.name = source["name"];
 	        this.localPath = source["localPath"];
+	        this.dest = source["dest"];
 	        this.remotePath = source["remotePath"];
 	        this.size = source["size"];
 	        this.done = source["done"];
@@ -328,6 +359,7 @@ export namespace app {
 	        this.status = source["status"];
 	        this.speed = source["speed"];
 	        this.error = source["error"];
+	        this.engine = source["engine"];
 	        this.createdAt = source["createdAt"];
 	        this.finishedAt = source["finishedAt"];
 	    }
@@ -343,6 +375,11 @@ export namespace config {
 	    theme: string;
 	    uploadPolicy: string;
 	    startMinimized: boolean;
+	    downloader: string;
+	    downloaderExec: string;
+	    downloaderArgs: string[];
+	    segments: number;
+	    sameName: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -355,6 +392,11 @@ export namespace config {
 	        this.theme = source["theme"];
 	        this.uploadPolicy = source["uploadPolicy"];
 	        this.startMinimized = source["startMinimized"];
+	        this.downloader = source["downloader"];
+	        this.downloaderExec = source["downloaderExec"];
+	        this.downloaderArgs = source["downloaderArgs"];
+	        this.segments = source["segments"];
+	        this.sameName = source["sameName"];
 	    }
 	}
 

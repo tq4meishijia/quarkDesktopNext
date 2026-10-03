@@ -28,15 +28,23 @@ const (
 	StatusCompleted Status = "completed"
 	StatusFailed    Status = "failed"
 	StatusCancelled Status = "cancelled"
+	// StatusHandedOff 任务已移交给外部下载器（IDM / 迅雷 / 浏览器等），
+	// 本进程不再跟踪进度，但仍算正常结束。
+	StatusHandedOff Status = "handedoff"
 )
 
 // IsTerminal 判断状态是否为终态。
 func (s Status) IsTerminal() bool {
 	switch s {
-	case StatusCompleted, StatusFailed, StatusCancelled:
+	case StatusCompleted, StatusFailed, StatusCancelled, StatusHandedOff:
 		return true
 	}
 	return false
+}
+
+// Succeeded 判断状态是否代表「正常结束」，含已移交。
+func (s Status) Succeeded() bool {
+	return s == StatusCompleted || s == StatusHandedOff
 }
 
 // Gate 是一个可被随时开关的"水龙头"：暂停时 Wait 阻塞，继续时放行。
@@ -89,12 +97,17 @@ type Spec struct {
 	Name string
 	// LocalPath 上传时为本地文件全路径；下载时为目标目录。
 	LocalPath string
+	// Dest 下载任务的最终本地文件全路径（已做同名与非法字符处理）。
+	// 上传任务为空。
+	Dest string
 	// RemotePath 上传时为远端目标全路径；下载时为展示用的网盘路径。
 	RemotePath string
 	// Fid 下载任务的网盘文件 ID（上传任务为空）。
 	Fid string
 	// Size 文件总字节数，未知时为 0。
 	Size int64
+	// Engine 下载器显示名，仅下载任务使用。
+	Engine string
 }
 
 // Task 是一个上传或下载任务。不可变字段在构造后只读，可变字段由互斥锁保护。
@@ -103,9 +116,11 @@ type Task struct {
 	Kind       string // upload | download
 	Name       string
 	LocalPath  string
+	Dest       string
 	RemotePath string
 	Fid        string
 	Size       int64
+	Engine     string
 	CreatedAt  time.Time
 
 	mu         sync.Mutex
@@ -137,9 +152,11 @@ func newTask(s Spec) *Task {
 		Kind:       s.Kind,
 		Name:       s.Name,
 		LocalPath:  s.LocalPath,
+		Dest:       s.Dest,
 		RemotePath: s.RemotePath,
 		Fid:        s.Fid,
 		Size:       s.Size,
+		Engine:     s.Engine,
 		CreatedAt:  time.Now(),
 		status:     StatusPending,
 		ctx:        ctx,

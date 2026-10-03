@@ -46,7 +46,15 @@
    `_UP_*`、`tfstk` 这类 HttpOnly 字段。现在点一次「在浏览器中登录」，客户端会起一个
    只代理 `*.quark.cn` 的临时本地服务并调起系统浏览器，照常登录即可，凭证自动入库。
    粘贴 Cookie 仍保留为兜底方式。
-2. **自动构建与发布**。`.github/workflows/ci.yml` 在 push / PR 时对桌面端与 `quark-cil`
+2. **内建多线程下载器**。`internal/engine` 用纯 Go 实现了一个行为对齐 aria2 的下载器：
+   HTTP Range 分片并发、`.part` 断点续传、暂停 / 取消即时生效，不依赖任何外部程序。
+3. **可切换的下载器**。除内建外，还可交给系统上已安装的 aria2 / Wget / cURL
+   （进度可跟踪），或 IDM / 迅雷 / Motrix / FDM / JDownloader / 系统浏览器
+   （唤起接管，进度不再跟踪，任务标记为「已移交下载器」）。可执行文件路径与命令行参数
+   都可在设置里覆盖，占位符 `{url}` `{dir}` `{file}` `{cookie}` `{referer}` `{ua}` 自动替换。
+4. **下载路径完全自定义**。默认路径之外，文件页支持「下载到…」单次改写落盘目录、
+   「保留目录结构」按网盘层级建子目录；同名文件默认自动加 `(1)` 序号而不是覆盖。
+5. **自动构建与发布**。`.github/workflows/ci.yml` 在 push / PR 时对桌面端与 `quark-cil`
    两个模块跑编译、静态检查和测试；`.github/workflows/desktop-release.yml` 在推送 `v*` 标签时
    编译各平台可执行文件并发布到 GitHub Release。
 
@@ -121,17 +129,27 @@ quarkDesktopNext/                        ← 仓库根，桌面端主工程
 │   ├── auth.go                          登录、环境变量登录、登出、用户资料
 │   ├── files.go                         目录浏览、搜索、新建、重命名、移动、复制、删除
 │   ├── transfer.go                      Runner 实现（上传/下载）+ 任务 API + 文件对话框
+│   ├── dest.go                          本地落盘路径解析：文件名清洗、同名策略、目录层级
+│   ├── dest_test.go                     路径解析单元测试
 │   ├── share.go                         分享解析、转存、创建分享、我的分享
-│   ├── settings.go                      设置读写、下载目录校验
-│   └── interactive.go                   交互式登录：启动本地代理、查询状态、取消
+│   ├── settings.go                      设置读写、下载器清单探测、打开本地目录
+│   └── interactive.go                   交互式登录：启动本地代理、查询状态、重开浏览器、取消
 ├── internal/
 │   ├── config/store.go                  配置与凭证持久化（settings.json / session.json 0600）
+│   ├── engine/                          下载引擎：内建分片下载器 + 外部下载器注册表
+│   │   ├── engine.go                    下载器描述、参数模板占位符替换、注册表与探测
+│   │   ├── native.go                    内建下载器：Range 分片并发 + .part 断点续传
+│   │   ├── process.go                   外部命令行 / GUI 下载器的启动与进度观察
+│   │   ├── lookup.go                    可执行文件查找与用默认程序打开链接
+│   │   ├── proc_windows.go              Windows 下隐藏控制台窗口
+│   │   ├── proc_other.go                非 Windows 平台的空实现
+│   │   └── engine_test.go               分片、断点续传、降级、参数替换的单元测试
 │   ├── loginproxy/                      交互式登录用的临时本地反向代理
-│   │   ├── proxy.go                     代理服务、地址与跳转改写
+│   │   ├── proxy.go                     代理服务、地址与跳转改写、横幅注入、收尾页
 │   │   ├── cookie.go                    Cookie 的采集、改写与跨主机合并
 │   │   └── proxy_test.go                代理逻辑单元测试
 │   └── transfer/
-│       ├── task.go                      任务状态机 + 暂停闸门 Gate + Runner 接口
+│       ├── task.go                      任务状态机（含「已移交」）+ 暂停闸门 Gate + Runner 接口
 │       └── manager.go                   并发调度、速度采样、事件节流、暂停/继续/取消/重试
 ├── frontend/
 │   ├── index.html                       唯一 HTML 入口
@@ -359,10 +377,16 @@ export KUAKE_PUUS='yyy'
 - **删掉 CSP 与 HSTS**：CSP 会把页面资源重新指向真实域名，那样流量就不再经过代理了。
 - **安全边界**：只绑 `127.0.0.1`、只有 `*.quark.cn` 在白名单（其余一律 403，
   避免变成开放代理）、5 分钟超时兜底、结束时立刻关服务。
+- **注入顶部横幅**：被代理的 HTML 页面顶部会插入一条说明「本窗口由桌面版临时打开、
+  仅代理 quark.cn、登录后自动关闭」。没有它，`127.0.0.1` 地址很容易被当成钓鱼页面。
+- **成功后的收尾页**：捕获凭证后不是立刻关停，而是继续服务 8 秒并返回「登录成功，
+  可以关闭此窗口」的页面；立刻关的话浏览器会显示「无法访问此网站」，用户会以为失败再点一次。
+- **可观测的进度**：界面能显示已收到的 Cookie 条数与剩余秒数，而不是只有一个不动的转圈；
+  浏览器没自动弹出或被误关时，可复制地址或点「重新打开浏览器」，不必重走整个流程。
 
 核心逻辑有单元测试覆盖（`internal/loginproxy/proxy_test.go`，
 `go test ./internal/loginproxy/`）：地址改写、Cookie 改写、跨主机合并、
-延迟收敛、超时与取消。
+延迟收敛、超时与取消、横幅注入、收尾页。
 
 ---
 
@@ -370,19 +394,19 @@ export KUAKE_PUUS='yyy'
 
 ### 7.1 前端 → 后端（Wails 绑定方法）
 
-业务方法共 36 个：
+业务方法共 40 个：
 
 | 分组 | 方法 |
 | --- | --- |
 | 登录 | `AuthStatus` `Login` `LoginFromEnv` `Logout` `GetProfile` |
 | 文件 | `ListDir` `Search` `CreateFolder` `Rename` `Delete` `Move` `Copy` `ResolveFid` |
-| 传输 | `PickUploadFiles` `PickDownloadDir` `EnqueueUploads` `EnqueueDownloads` `ListTasks` `PauseTask` `ResumeTask` `CancelTask` `CancelAllTasks` `RetryTask` `PauseAllTasks` `ResumeAllTasks` `ClearCompletedTasks` `RevealLocal` |
+| 传输 | `PickUploadFiles` `PickDownloadDir` `EnqueueUploads` `EnqueueDownloads` `ListTasks` `PauseTask` `ResumeTask` `CancelTask` `CancelAllTasks` `RetryTask` `PauseAllTasks` `ResumeAllTasks` `ClearCompletedTasks` `RevealLocal` `OpenTaskDest` |
 | 分享 | `ParseShare` `SaveShare` `CreateShareLink` `ListMyShares` `DeleteShare` |
-| 设置 | `GetSettings` `SaveSettings` `ConfigDir` `EnsureDownloadDir` |
+| 设置 | `GetSettings` `SaveSettings` `ConfigDir` `EnsureDownloadDir` `ListDownloaders` `PickDownloaderExec` `RevealLocalDir` |
 
 另有两组不参与业务调用的方法：交互式登录的 `StartInteractiveLogin` /
-`InteractiveLoginStatus` / `CancelInteractiveLogin`，以及 Wails 生命周期回调
-`Startup` / `Shutdown` / `DomReady`。
+`InteractiveLoginStatus` / `CancelInteractiveLogin` / `OpenInteractiveLoginURL`，
+以及 Wails 生命周期回调 `Startup` / `Shutdown` / `DomReady`。
 
 > `Upload` / `Download` 两个 Runner 方法刻意挂在未导出类型 `sdkRunner` 上，
 > 否则会被 Wails 一起生成到前端（参数含 `*transfer.Task`，前端根本无法构造）。
@@ -402,11 +426,11 @@ export KUAKE_PUUS='yyy'
 
 | 页面 | 覆盖的要点 |
 | --- | --- |
-| 登录授权 | Cookie 粘贴、环境变量登录、四步取 Cookie 指引、凭证存储说明、内联报错 |
-| 文件浏览 | 列表 / 网格双视图、面包屑、搜索（可切「含子目录」）、多选（点击 / Ctrl / Shift 区间）、批量下载/重命名/移动/复制/删除、行内操作、三列排序、骨架屏 / 空态 / 错误态 |
-| 传输任务 | 进行中-已完成-总速度汇总、全部暂停 / 继续 / 清除已结束、筛选（全部/进行中/已完成/失败）、单任务暂停/继续/取消/重试、实时进度与速度与剩余时间 |
+| 登录授权 | 「在浏览器中登录」为主路径（含进度、已收凭证条数、倒计时、复制地址、重新打开浏览器、失败重试），Cookie 粘贴与环境变量登录为兜底，凭证存储说明 |
+| 文件浏览 | 列表 / 网格双视图、面包屑、搜索（可切「含子目录」）、多选（点击 / Ctrl / Shift 区间）、批量下载 / 「下载到…」/ 重命名/移动/复制/删除、保留目录结构开关、行内操作、三列排序、骨架屏 / 空态 / 错误态 |
+| 传输任务 | 进行中-已完成-总速度汇总、全部暂停 / 继续 / 清除已结束、筛选（全部/进行中/已完成/失败）、单任务暂停/继续/取消/重试、下载器标签与本地落盘路径、完成后「打开所在目录」、已移交任务的状态说明 |
 | 分享转存 | 链接解析 → 条目勾选 → 目标目录 → 转存所选 / 整包转存；另有「我的分享」列表 |
-| 设置 | 下载路径（含系统目录选择）、并发数 1–16、亮/暗/跟随系统主题、上传同名策略、配置目录展示、恢复默认 |
+| 设置 | 默认下载路径（含系统目录选择与打开目录）、同名文件策略、下载器选择（内建 + 8 种外部下载器，标注是否检测到）、内建分片并发数 1–16、外部下载器路径与命令行参数、并发数 1–16、亮/暗/跟随系统主题、上传同名策略、配置目录展示、恢复默认 |
 
 设计约束：圆角只有 8/12/18 三档，间距 4px 基准，颜色全部走 CSS 变量；
 断点 1080px 侧边栏收成图标栏，760px 隐藏侧边栏并简化列表列，480px 网格降列宽。
@@ -422,10 +446,15 @@ export KUAKE_PUUS='yyy'
 | Go 编译 | `go build ./...`（两个模块） | 通过 |
 | Go 静态检查 | `go vet ./...`（两个模块） | 通过 |
 | 单元测试 | `go test ./...`（两个模块） | 通过 |
-| 前端语法 | `node scripts/check-frontend-syntax.mjs`，25 个 JS 文件按 ESM 严格模式解析 | 0 失败 |
+| 前端语法 | `node --experimental-vm-modules scripts/check-frontend-syntax.mjs`，25 个 JS 文件按 ESM 严格模式解析 | 0 失败 |
 | 模块解析 | 自写脚本校验全部相对 import | `imports=65 missing=0` |
 | 运行时冒烟① | 系统自带 Edge（无头）驱动完整链路：登录 → 5 个页面路由 → 列表/网格/搜索（当前目录与含子目录）/多选 → 传输页筛选与批量操作 → 分享解析 → 设置页主题切换（深色/浅色/跟随系统生效）→ 720/460px 窄窗口 → 退出登录 | 43 项断言全过，console 0 错误 |
 | 运行时冒烟② | 任务行暂停/继续/取消/重试、任务筛选、全部暂停/继续/清除已结束；文件页新建文件夹、重命名、删除确认、无结果空态 | 34 项断言全过，console 0 错误 |
+| 运行时冒烟③ | 交互式登录链路（点击 → 等待 → 自动成功 → 进入主外壳） | 6 项断言全过，console 0 错误 |
+| 运行时冒烟④ | 本轮新增：登录页进度/倒计时/复制地址/重新打开浏览器、已移交任务状态与打开目录入口、文件页「下载到…」与保留目录结构、设置页下载器切换与路径/命令行行 | 33 项断言全过，console 0 错误 |
+| 下载引擎单测 | `go test ./internal/engine/`：4 线程分片下载字节级一致、断点续传只重拉未完成分片、过期状态被丢弃、服务端不支持 Range 时降级、闸门中止、参数占位符替换、注册表查表 | 全部通过 |
+| 路径解析单测 | `go test ./app/`：文件名非法字符与 Windows 设备名清洗、三种同名策略、目录自动创建、网盘层级映射 | 全部通过 |
+| 代理新增单测 | `go test ./internal/loginproxy/`：倒计时递减、HTML 横幅注入、无 `<body>` 时不改坏内容、捕获后返回收尾页 | 全部通过 |
 | 资源加载 | 静态预览服务器访问日志 | 全部 200（favicon 已内联，无 404） |
 | 真实构建 | `.\scripts\build.ps1 -Clean -Version 1.0.0` | 通过，67.8s 产出 `build\bin\kuake-desktop.exe`（10.4 MB，含应用图标） |
 
@@ -438,12 +467,24 @@ export KUAKE_PUUS='yyy'
 ## 10. 已知限制
 
 1. **上传取消是软中断**：`sdk.UploadFile` 的进度回调没有中断钩子，取消进行中的上传会在
-   下一个进度回调边界生效；等待中的任务可以立即移除。下载走自建 HTTP 循环，取消立即生效。
+   下一次进度回调边界生效；等待中的任务可以立即移除。内建下载器直接消费任务 context，
+   取消立即生效。
 2. **暂停是背压式**：暂停通过阻塞进度回调实现（不再向下游要数据），不是断开连接重连。
+   外部下载器由它自己实现暂停，本客户端无法干预。
 3. **搜索是客户端遍历**：SDK 没有服务端搜索接口，`Search` 会按目录广度优先下钻，
    受深度 5 / 节点 3000 / 命中 300 三重保护，触及上限时界面会提示「结果可能被截断」。
 4. **不支持上传整个文件夹**：选到目录会跳过并提示，与 CLI 的单文件上传语义一致。
-5. **下载不续传**：断点续传目前只在上传路径上由 SDK 提供。
+5. **外部下载器的进度是观察值**：aria2 / Wget / cURL 这类命令行下载器没有统一的进度接口，
+   本客户端按目标文件大小汇报，属于观察值而非精确值；IDM / 迅雷 / Motrix / FDM /
+   JDownloader / 浏览器属于「唤起接管」，直链会同时写入剪贴板，任务立刻标记为
+   「已移交下载器」，不再跟踪进度与暂停取消。
+6. **IDM 一类 GUI 下载器可能不接受自定义请求头**：夸克直链通常需要 Cookie 头才能下载，
+   而 IDM 的命令行参数无法携带 Cookie，这种组合可能被拒绝。此时用内建下载器或 aria2 更稳。
+7. **分片下载依赖服务端支持 Range**：内建下载器先发 `Range: bytes=0-0` 探测，
+   服务端返回 200（整文件）时自动降级为单连接下载，此时没有加速也没有续传。
+8. **断点续传的范围**：内建下载器在任务生命周期内支持续传（`.part` + 状态文件，
+   只在同一 URL、同一分片数、同一文件大小下续传）。跨任务或改过下载器参数后不会续传，
+   `.part` 会被当作新任务重新下载。应用重启后的历史任务不会恢复。
 
 ---
 

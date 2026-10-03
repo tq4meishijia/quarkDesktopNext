@@ -15,6 +15,7 @@ export const STATUS_TEXT = {
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',
+  handedoff: '已移交下载器',
 };
 
 const STATUS_BADGE = {
@@ -24,6 +25,7 @@ const STATUS_BADGE = {
   completed: 'badge--success',
   failed: 'badge--danger',
   cancelled: '',
+  handedoff: 'badge--warn',
 };
 
 const DOT_CLASS = {
@@ -33,6 +35,7 @@ const DOT_CLASS = {
   completed: 'dot--success',
   failed: 'dot--danger',
   cancelled: '',
+  handedoff: 'dot--warn',
 };
 
 /**
@@ -42,21 +45,27 @@ const DOT_CLASS = {
  * @param {(id:string)=>void} opts.onResume
  * @param {(id:string)=>void} opts.onCancel
  * @param {(id:string)=>void} opts.onRetry
+ * @param {(id:string)=>void} opts.onOpen 打开落盘目录
  */
-export function taskRow({ task, onPause, onResume, onCancel, onRetry }) {
+export function taskRow({ task, onPause, onResume, onCancel, onRetry, onOpen }) {
   const isUpload = task.kind === 'upload';
   const status = task.status || 'pending';
   const active = status === 'running' || status === 'pending';
   const left = Math.max(0, (task.size || 0) - (task.done || 0));
+  // 已移交外部下载器的任务本进程不再跟踪，不提供暂停/取消——给了也是假的。
+  const handed = status === 'handedoff';
+  const done = status === 'completed' || handed;
 
-  const progressClass =
+const progressClass =
     status === 'completed'
       ? 'progress progress--success'
       : status === 'failed'
-      ? 'progress progress--danger'
-      : status === 'paused'
-      ? 'progress progress--paused'
-      : 'progress';
+        ? 'progress progress--danger'
+        : status === 'paused'
+          ? 'progress progress--paused'
+          : handed
+            ? 'progress progress--warn'
+            : 'progress';
 
   const actions = [];
   if (status === 'running' || status === 'pending') {
@@ -71,6 +80,9 @@ export function taskRow({ task, onPause, onResume, onCancel, onRetry }) {
     );
   } else if (status === 'failed' || status === 'cancelled') {
     actions.push(iconBtn('retry', '重试', () => onRetry && onRetry(task.id)));
+  }
+  if (done && !isUpload && onOpen) {
+    actions.push(iconBtn('folder', '打开所在目录', () => onOpen(task.id)));
   }
 
   return h(
@@ -104,16 +116,20 @@ export function taskRow({ task, onPause, onResume, onCancel, onRetry }) {
           class: 'task__stats',
           text: status === 'running'
             ? bytes(task.done) + ' / ' + bytes(task.size) + ' · ' + fmtSpeed(task.speed) + ' · 剩余 ' + eta(left, task.speed)
-            : bytes(task.done) + ' / ' + bytes(task.size) + (task.error ? ' · ' + task.error : ''),
+            : handed
+              ? '已交给 ' + (task.engine || '外部下载器') + '，进度请在对应程序中查看'
+              : bytes(task.done) + ' / ' + bytes(task.size) + (task.error ? ' · ' + task.error : ''),
         }),
         h('span', { class: 'grow' }),
-        h('span', { class: 'task__stats', text: isUpload ? '上传' : '下载' })
+        h('span', { class: 'task__stats', text: task.engine || (isUpload ? '上传' : '下载') })
       ),
-      task.remotePath
+      task.dest || task.remotePath
         ? h('div', {
             class: 'task__path',
-            title: isUpload ? task.localPath : task.remotePath,
-            text: isUpload ? '本地 ' + (task.localPath || '') : '网盘 ' + task.remotePath,
+            title: isUpload ? task.localPath : task.dest || task.remotePath,
+            text: isUpload
+              ? '本地 ' + (task.localPath || '')
+              : (task.dest ? '本地 ' + task.dest : '网盘 ' + task.remotePath),
           })
         : null
     ),

@@ -43,7 +43,7 @@ func (a *App) StartInteractiveLogin() (InteractiveLoginState, error) {
 	}
 	a.loginSession = session
 	a.loginPhase = PhaseWaiting
-	a.loginHint = "浏览器已打开夸克网盘登录页，登录后会自动回到本窗口。"
+	a.loginHint = "已打开浏览器，请在弹出的夸克网盘页面完成登录。"
 	ctx := a.ctx
 	a.mu.Unlock()
 
@@ -54,6 +54,21 @@ func (a *App) StartInteractiveLogin() (InteractiveLoginState, error) {
 
 	go a.awaitInteractiveLogin(session)
 	return a.interactiveState(), nil
+}
+
+// OpenInteractiveLoginURL 重新在系统浏览器打开登录页。
+// 浏览器没自动弹出、或用户误关掉了窗口时，用它把入口再要一次——
+// 不必重新走一遍整个登录流程。
+func (a *App) OpenInteractiveLoginURL() bool {
+	a.mu.Lock()
+	session := a.loginSession
+	ctx := a.ctx
+	a.mu.Unlock()
+	if session == nil || ctx == nil {
+		return false
+	}
+	runtime.BrowserOpenURL(ctx, session.URL())
+	return true
 }
 
 // InteractiveLoginStatus 返回当前交互式登录进度，供界面轮询。
@@ -97,12 +112,16 @@ func (a *App) awaitInteractiveLogin(session *loginproxy.Session) {
 		return
 	}
 
+	// 抓到了凭证但校验还没过，先把界面切到「正在校验」，
+	// 否则这段几百毫秒里界面毫无反馈，用户会以为按钮没生效。
+	a.setLoginPhase(PhaseCapturing, "已捕获登录凭证，正在校验…")
+
 	if _, cerr := a.connect(cookie, "interactive"); cerr != nil {
 		a.setLoginPhase(PhaseError, cerr.Error())
 		a.notify("error", "登录校验失败："+cerr.Error())
 		return
 	}
-	a.setLoginPhase(PhaseSuccess, "登录成功。")
+	a.setLoginPhase(PhaseSuccess, "登录成功，凭证已保存到本机。")
 	a.notify("success", "已通过浏览器登录，凭证已保存到本机")
 }
 
@@ -110,16 +129,18 @@ func (a *App) awaitInteractiveLogin(session *loginproxy.Session) {
 func (a *App) interactiveState() InteractiveLoginState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	url := ""
-	if a.loginSession != nil {
-		url = a.loginSession.URL()
-	}
-	return InteractiveLoginState{
+	st := InteractiveLoginState{
 		Active: a.loginSession != nil,
 		Phase:  a.loginPhase,
 		Hint:   a.loginHint,
-		URL:    url,
 	}
+	if a.loginSession != nil {
+		st.URL = a.loginSession.URL()
+		_, collected := a.loginSession.Snapshot()
+		st.Collected = collected
+		st.Remaining = a.loginSession.Remaining()
+	}
+	return st
 }
 
 // setLoginPhase 更新阶段与提示文案。

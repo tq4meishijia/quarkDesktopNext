@@ -46,8 +46,8 @@ export function DeleteShare(arg1) {
   return window['go']['app']['App']['DeleteShare'](arg1);
 }
 
-export function EnqueueDownloads(arg1) {
-  return window['go']['app']['App']['EnqueueDownloads'](arg1);
+export function EnqueueDownloads(arg1, arg2, arg3) {
+  return window['go']['app']['App']['EnqueueDownloads'](arg1, arg2, arg3);
 }
 
 export function EnqueueUploads(arg1, arg2) {
@@ -74,6 +74,10 @@ export function ListDir(arg1) {
   return window['go']['app']['App']['ListDir'](arg1);
 }
 
+export function ListDownloaders() {
+  return window['go']['app']['App']['ListDownloaders']();
+}
+
 export function ListMyShares(arg1, arg2) {
   return window['go']['app']['App']['ListMyShares'](arg1, arg2);
 }
@@ -98,6 +102,14 @@ export function Move(arg1, arg2) {
   return window['go']['app']['App']['Move'](arg1, arg2);
 }
 
+export function OpenInteractiveLoginURL() {
+  return window['go']['app']['App']['OpenInteractiveLoginURL']();
+}
+
+export function OpenTaskDest(arg1) {
+  return window['go']['app']['App']['OpenTaskDest'](arg1);
+}
+
 export function ParseShare(arg1) {
   return window['go']['app']['App']['ParseShare'](arg1);
 }
@@ -112,6 +124,10 @@ export function PauseTask(arg1) {
 
 export function PickDownloadDir() {
   return window['go']['app']['App']['PickDownloadDir']();
+}
+
+export function PickDownloaderExec() {
+  return window['go']['app']['App']['PickDownloaderExec']();
 }
 
 export function PickUploadFiles() {
@@ -140,6 +156,10 @@ export function RetryTask(arg1) {
 
 export function RevealLocal(arg1) {
   return window['go']['app']['App']['RevealLocal'](arg1);
+}
+
+export function RevealLocalDir(arg1) {
+  return window['go']['app']['App']['RevealLocalDir'](arg1);
 }
 
 export function SaveSettings(arg1) {

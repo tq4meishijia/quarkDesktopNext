@@ -1051,6 +1051,12 @@
   word-break: break-all;
 }
 
+/* 进度细节行：已收到的凭证条数 + 剩余时间 */
+.login__interactive-meta {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
 /* ---------- 响应式：窗口变窄时的适配 ---------- */
 
 /* 中等宽度：侧边栏收窄为图标栏 */

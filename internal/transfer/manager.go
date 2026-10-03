@@ -18,6 +18,10 @@ import (
 // ErrNotFound 任务不存在。
 var ErrNotFound = errors.New("任务不存在")
 
+// ErrHandedOff 由 Runner 返回，表示任务已交给外部下载器，本进程停止跟踪。
+// Manager 会把它落成「已移交」终态，而不是失败。
+var ErrHandedOff = errors.New("已移交给外部下载器")
+
 // Manager 是传输队列的调度中心：
 //   - 固定数量的 worker 从 queue 取任务；
 //   - 通过容量为 N 的信号量控制"同时进行的文件数"，N 可在运行时调整；
@@ -162,6 +166,9 @@ func (m *Manager) run(t *Task) {
 	m.mu.Unlock()
 
 	switch {
+	case errors.Is(err, ErrHandedOff):
+		// 外部下载器已接管：不是失败，进度不再由本进程汇报。
+		t.setStatus(StatusHandedOff)
 	case err == nil:
 		if t.Size > 0 {
 			t.setDone(t.Size)

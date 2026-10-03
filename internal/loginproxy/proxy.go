@@ -22,6 +22,7 @@
 package loginproxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -47,7 +48,37 @@ const (
 
 	// maxRewriteBody 是改写响应体的上限，超过就直接原样转发（登录页远小于此）。
 	maxRewriteBody = 8 << 20
+
+	// gracePeriod 是捕获凭证后继续服务的时间：这段时间里浏览器会拿到
+	// 「登录成功」的收尾页，而不是连接被拒绝的白屏。
+	gracePeriod = 8 * time.Second
 )
+
+// donePage 是捕获凭证后返回给浏览器的收尾页。
+// 刻意做成不依赖外部资源的内联页面：此刻代理已收工，任何外部资源都取不到。
+const donePage = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>登录成功</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:#0f1115;color:#e6e8eb}
+.box{text-align:center;padding:40px}
+h1{font-size:20px;margin:0 0 10px}
+p{color:#9aa1ab;margin:4px 0}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3ecf8e;margin-right:8px}
+</style></head><body><div class="box">
+<h1><span class="dot"></span>登录成功</h1>
+<p>凭证已保存到本机，这个窗口可以直接关闭。</p>
+<p>若窗口没有自动关闭，请手动关掉它。</p>
+</div></body></html>`
+
+// bannerHTML 是注入到被代理页面顶部的提示条。
+// 目的很单纯：让用户知道「这个 127.0.0.1 页面是本客户端开的，不是可疑站点」，
+// 以及登录完成后会发生什么——否则代理登录很容易被当成钓鱼页面而中断。
+const bannerHTML = `<div id="__quark_proxy_banner" style="position:fixed;z-index:2147483647;
+top:0;left:0;right:0;padding:8px 14px;background:#0f1115;color:#e6e8eb;
+font:13px/1.5 -apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
+border-bottom:1px solid #2b3038;box-shadow:0 2px 8px rgba(0,0,0,.35)">
+本窗口由夸克网盘桌面版临时打开，用于安全读取登录凭证（仅限 quark.cn）。登录成功后会自动关闭。
+</div>`
 
 // allowedSuffix 是可代理的域名后缀。
 var allowedSuffix = []string{".quark.cn"}
@@ -72,6 +103,7 @@ type Session struct {
 
 	timeout     time.Duration
 	settleDelay time.Duration
+	deadline    time.Time
 
 	mu    sync.Mutex
 	jar   map[string]string // 合并后的 Cookie：name -> value
@@ -100,6 +132,7 @@ func Start(timeout time.Duration) (*Session, error) {
 		done:        make(chan struct{}),
 		timeout:     timeout,
 		settleDelay: settleDelay,
+		deadline:    time.Now().Add(timeout),
 	}
 	s.srv = &http.Server{Handler: s, ReadHeaderTimeout: 15 * time.Second}
 	s.client = &http.Client{
@@ -137,6 +170,16 @@ func (s *Session) Snapshot() (ready bool, collected int) {
 	return s.ready, len(s.jar)
 }
 
+// Remaining 返回距离超时的剩余秒数，已收敛或已关闭时返回 0。
+// 界面用它显示倒计时，避免用户对着一个不动的进度条猜要等多久。
+func (s *Session) Remaining() int {
+	left := time.Until(s.deadline).Seconds()
+	if left <= 0 {
+		return 0
+	}
+	return int(left) + 1
+}
+
 // Close 关闭会话与端口，可重复调用。
 func (s *Session) Close() {
 	s.closeOnce.Do(func() { close(s.done) })
@@ -157,10 +200,32 @@ func (s *Session) watchdog() {
 	}
 }
 
+// captured 返回是否已捕获登录凭证（用于决定是否进入收尾页阶段）。
+func (s *Session) captured() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ready
+}
+
 // finish 落地结果，保证只写一次。
+//
+// 成功时不立即关停：留一段宽限期让浏览器把收尾页显示出来，
+// 否则用户会看到「无法访问此网站」，误以为登录失败又点一遍。
 func (s *Session) finish(res Result) {
 	s.resultOnce.Do(func() { s.resultCh <- res })
-	s.Close()
+	if res.Err != nil {
+		s.Close()
+		return
+	}
+	timer := time.NewTimer(gracePeriod)
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			s.Close()
+		case <-s.done:
+		}
+	}()
 }
 
 // scheduleFinish 在探测到凭证后再收集一小会儿，然后收摊。
@@ -209,6 +274,13 @@ func (s *Session) absorbOne(name, value string) bool {
 // ---------- HTTP ----------
 
 func (s *Session) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 凭证已捕获后的宽限期内，一律返回收尾页，避免浏览器撞上连接被拒。
+	if s.captured() {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, donePage)
+		return
+	}
 	if r.URL.Path == "/" {
 		http.Redirect(w, r, prefix+"/pan.quark.cn/", http.StatusFound)
 		return
@@ -339,7 +411,7 @@ func (s *Session) writeResponse(w http.ResponseWriter, resp *http.Response, host
 			return
 		}
 		if len(buf) <= maxRewriteBody {
-			body = localizeBytes(buf)
+			body = injectBanner(localizeBytes(buf))
 		} else {
 			body = buf
 		}
@@ -428,6 +500,26 @@ func localize(s string) string {
 func localizeBytes(b []byte) []byte {
 	b = escapedHostRe.ReplaceAll(b, []byte(prefix+"/$1"))
 	return hostRe.ReplaceAll(b, []byte(prefix+"/$1"))
+}
+
+// injectBanner 在 HTML 的 <body> 后插入提示条。
+// 找不到 <body> 时直接放弃注入：提示条只是体验增强，不值得为此改坏页面结构。
+func injectBanner(b []byte) []byte {
+	lower := bytes.ToLower(b)
+	i := bytes.Index(lower, []byte("<body"))
+	if i < 0 {
+		return b
+	}
+	j := bytes.IndexByte(b[i:], '>')
+	if j < 0 {
+		return b
+	}
+	at := i + j + 1
+	out := make([]byte, 0, len(b)+len(bannerHTML))
+	out = append(out, b[:at]...)
+	out = append(out, bannerHTML...)
+	out = append(out, b[at:]...)
+	return out
 }
 
 // shouldRewrite 判断响应体是否需要改写域名。
