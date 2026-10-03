@@ -52,12 +52,28 @@ func (s Status) Succeeded() bool {
 type Gate struct {
 	mu     sync.Mutex
 	paused bool
+
+	// changed 在 Set 时被关闭并重建，用于唤醒 Wait 中的 Runner，
+	// 使「解除暂停」能立即生效而不是等下一次 100ms 轮询。
+	changed chan struct{}
+}
+
+// NewGate 创建一个初始为放行状态的闸门。
+func NewGate() *Gate {
+	return &Gate{changed: make(chan struct{})}
 }
 
 // Set 设置暂停开关；解除暂停时立即唤醒所有等待者。
 func (g *Gate) Set(paused bool) {
 	g.mu.Lock()
+	if g.paused == paused {
+		g.mu.Unlock()
+		return
+	}
 	g.paused = paused
+	// 广播：无论开启还是关闭都要唤醒，Wait 醒来后会重新读 paused。
+	close(g.changed)
+	g.changed = make(chan struct{})
 	g.mu.Unlock()
 }
 
@@ -69,22 +85,34 @@ func (g *Gate) Paused() bool {
 }
 
 // Wait 在暂停期间阻塞；ctx 被取消时立即返回 ctx.Err()。
-// 轮询间隔 100ms，兼顾响应速度与 CPU 占用。
+// ctx 为 nil 时只做一次状态检查，不阻塞。
+//
+// 暂停期间返回 ErrPaused 而非 nil：让 Runner 能把"用户暂停"与"真失败"区分开，
+// Manager 据此让出并发槽位并保留进度等待 Resume 续传。
 func (g *Gate) Wait(ctx context.Context) error {
 	if ctx == nil {
+		if g.Paused() {
+			return ErrPaused
+		}
 		return nil
 	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !g.Paused() {
+		g.mu.Lock()
+		if !g.paused {
+			g.mu.Unlock()
 			return nil
 		}
+		changed := g.changed
+		g.mu.Unlock()
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-changed:
+			// Set 发生了动作，重新检查 paused / ctx。
 		}
 	}
 }
@@ -161,15 +189,24 @@ func newTask(s Spec) *Task {
 		status:     StatusPending,
 		ctx:        ctx,
 		cancel:     cancel,
-		gate:       &Gate{},
+		gate:       NewGate(),
 	}
 }
 
 // Context 返回任务上下文，取消后 Runner 应尽快退出。
-func (t *Task) Context() context.Context { return t.ctx }
+// Retry 会换新的 ctx，故用锁读取避免与 Retry 的写竞争。
+func (t *Task) Context() context.Context {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.ctx
+}
 
-// Gate 返回暂停闸门。
-func (t *Task) Gate() *Gate { return t.gate }
+// Gate 返回暂停闸门。Retry 会换新的闸门，故用锁读取。
+func (t *Task) Gate() *Gate {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.gate
+}
 
 // Status 返回当前状态。
 func (t *Task) Status() Status {
@@ -211,6 +248,16 @@ func (t *Task) setDone(done int64) {
 	t.mu.Lock()
 	t.done = done
 	t.mu.Unlock()
+}
+
+// requestCancel 触发任务 context 取消。取锁读取 cancel 以免与 Retry 的替换竞争。
+func (t *Task) requestCancel() {
+	t.mu.Lock()
+	cancel := t.cancel
+	t.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (t *Task) setStatus(s Status) {
@@ -275,4 +322,57 @@ func itoa(v uint64) string {
 		v /= 10
 	}
 	return string(buf[i:])
+}
+
+// toPersisted 导出为落盘形态。
+func (t *Task) toPersisted() persistedTask {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return persistedTask{
+		ID:         t.ID,
+		Kind:       t.Kind,
+		Name:       t.Name,
+		LocalPath:  t.LocalPath,
+		Dest:       t.Dest,
+		RemotePath: t.RemotePath,
+		Fid:        t.Fid,
+		Size:       t.Size,
+		Engine:     t.Engine,
+		CreatedAt:  t.CreatedAt,
+		Status:     t.status,
+		ErrMsg:     t.errMsg,
+		FinishedAt: t.finishedAt,
+	}
+}
+
+// restoreTask 从落盘形态恢复任务。
+//
+// 恢复出的任务统一为 StatusPaused（可 Resume 续传），而不是原来的
+// running/pending —— 进程已退出，原状态不再成立。
+// 终态任务（完成/失败/取消/已移交）保持原状，仅供用户查看历史。
+func restoreTask(pt persistedTask) *Task {
+	ctx, cancel := context.WithCancel(context.Background())
+	status := pt.Status
+	if !status.IsTerminal() {
+		status = StatusPaused
+	}
+	return &Task{
+		ID:         pt.ID,
+		Kind:       pt.Kind,
+		Name:       pt.Name,
+		LocalPath:  pt.LocalPath,
+		Dest:       pt.Dest,
+		RemotePath: pt.RemotePath,
+		Fid:        pt.Fid,
+		Size:       pt.Size,
+		Engine:     pt.Engine,
+		CreatedAt:  pt.CreatedAt,
+		ctx:        ctx,
+		cancel:     cancel,
+		gate:       NewGate(),
+		done:       0,
+		status:     status,
+		errMsg:     pt.ErrMsg,
+		finishedAt: pt.FinishedAt,
+	}
 }

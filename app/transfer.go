@@ -67,7 +67,7 @@ func (r *sdkRunner) Upload(ctx context.Context, t *transfer.Task, prog transfer.
 		return err
 	}
 	if resp == nil || !resp.Success {
-		return errors.New(respMessage(resp))
+		return r.app.respErr(resp)
 	}
 	return nil
 }
@@ -86,17 +86,28 @@ func (r *sdkRunner) Download(ctx context.Context, t *transfer.Task, prog transfe
 	if err != nil {
 		return err
 	}
+	// SSRF 校验：直链交给任何下载器之前先确认不是内网目标。
+	if err := guardDownloadURL(dlURL); err != nil {
+		return err
+	}
 	set := r.app.currentSettings()
 
 	desc, ok := engine.Lookup(set.Downloader)
 	if !ok {
 		return errors.New("未知的下载器：" + set.Downloader)
 	}
+	// 内建下载器在本进程内跑，可用完整凭证（直链校验成功率最高）；
+	// 外部下载器不受本进程控制，只给白名单内的下载校验键，
+	// 避免把 __pus 这类账号登录态凭证交到第三方程序手里。
+	cookie := cookieHeader(qc.GetCookies())
+	if desc.ID != engine.BuiltinID {
+		cookie = downloadCookieHeader(qc.GetCookies())
+	}
 	req := engine.Request{
 		URL:      dlURL,
 		Dest:     t.Dest,
 		Size:     t.Size,
-		Cookie:   cookieHeader(qc.GetCookies()),
+		Cookie:   cookie,
 		Referer:  sdk.PAN_DOMAIN + "/",
 		UA:       engine.UA,
 		Segments: set.Segments,
@@ -105,16 +116,90 @@ func (r *sdkRunner) Download(ctx context.Context, t *transfer.Task, prog transfe
 	}
 
 	if desc.ID == engine.BuiltinID {
-		return (&engine.Native{}).Fetch(ctx, req)
+		return normalizeEngineError((&engine.Native{}).Fetch(ctx, req))
 	}
-	return engine.Run(ctx, desc, engine.Options{
+	// engine.Run 命中「已移交」时返回的是 engine 包的 ErrHandedOff，
+	// 与 transfer.ErrHandedOff 是两个独立 sentinel，必须显式桥接，
+	// 否则 Manager 匹配不到，任务会被误判为「失败」。
+	err = engine.Run(ctx, desc, engine.Options{
 		Exec:    set.DownloaderExec,
 		Args:    set.DownloaderArgs,
 		CopyURL: r.app.copyToClipboard,
 	}, req)
+	if errors.Is(err, engine.ErrHandedOff) {
+		return transfer.ErrHandedOff
+	}
+	return err
+}
+
+// normalizeEngineError 把内建下载器返回的暂停错误转成 transfer 的哨兵。
+//
+// 暂停时 Gate 返回 transfer.ErrPaused，经 http 层包装后错误文本仍然包含它，
+// 但 errors.Is 未必成立（可能被 fmt.Errorf 包裹成 %v）。这里按文本兜底判定，
+// 保证「暂停」不会被记成「失败」，否则任务丢失续传状态。
+func normalizeEngineError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, transfer.ErrPaused) {
+		return transfer.ErrPaused
+	}
+	if strings.Contains(err.Error(), transfer.ErrPaused.Error()) {
+		return transfer.ErrPaused
+	}
+	return err
+}
+
+// downloadCredentialAllowlist 是允许随下载直链交给外部下载器的 Cookie 白名单。
+//
+// 为什么要白名单而不是"全给"：完整 Cookie 里的 __pus / __puus 是账号登录态凭证，
+// 等价于账号本身。交给 IDM / 浏览器这类不受本进程控制的第三方程序，
+// 等于把登录态存到对方进程甚至磁盘上。白名单只保留下载直链校验实际需要的键，
+// 从源头收敛暴露面。
+//
+// 保留的键：
+//   - _UP_*  / __puus：直链回调校验所需（README §1 明确提到手抄常缺这类字段）；
+//   - tfstk           ：下载风控校验常见项；
+//   - b-user-id       ：下载归属校验。
+//
+// 明确剔除：__pus、__puus 之外的账号级会话键，以及任何未列入白名单的键。
+// 缺键只会导致个别直链被服务端拒绝（用户可改用内建下载器），
+// 而泄漏账号凭证的后果远大于此；且内建下载器根本不受此白名单限制。
+var downloadCredentialAllowlist = map[string]bool{
+	"__puus":    true,
+	"tfstk":     true,
+	"b-user-id": true,
+}
+
+// downloadCookieHeader 拼出交给外部下载器的 Cookie 头，只保留白名单内的键。
+//
+// 内建下载器走 native.Fetch，不经过这里，仍用完整凭证（见 sdkRunner.Download）。
+func downloadCookieHeader(cookies map[string]string) string {
+	if len(cookies) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(cookies))
+	for k := range cookies {
+		// _UP_ 前缀是分片上传/下载校验族，全部放行。
+		if downloadCredentialAllowlist[k] || strings.HasPrefix(k, "_UP_") {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if v := cookies[k]; v != "" {
+			parts = append(parts, k+"="+v)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // cookieHeader 把 cookie 字典拼成请求头用的 "a=1; b=2" 形式，键名排序保证可复现。
+// 仅用于内建下载器（不走外部程序，故可带完整凭证）。
 func cookieHeader(cookies map[string]string) string {
 	if len(cookies) == 0 {
 		return ""
@@ -167,6 +252,14 @@ func (a *App) EnqueueUploads(localPaths []string, remoteDir string) ([]TaskDTO, 
 		return nil, errors.New("没有选择文件")
 	}
 	dir := normalizeDir(remoteDir)
+	// 前置策略校验：操作名、远端目录、本地敏感文件（SSH 私钥/系统文件等）。
+	g := loadGuardConfig()
+	if err := g.checkOp("upload"); err != nil {
+		return nil, err
+	}
+	if err := g.checkRemotePath(dir); err != nil {
+		return nil, err
+	}
 	out := make([]TaskDTO, 0, len(localPaths))
 	for _, lp := range localPaths {
 		lp = strings.TrimSpace(lp)
@@ -180,6 +273,12 @@ func (a *App) EnqueueUploads(localPaths []string, remoteDir string) ([]TaskDTO, 
 		}
 		if st.IsDir() {
 			a.notify("warn", "暂不支持上传整个文件夹："+filepath.Base(lp))
+			continue
+		}
+		// 敏感文件拦截：这是防止凭证误外泄的关键一步，
+		// SDK 侧只看扩展名与大小，不看文件本身是什么。
+		if err := g.checkUploadFile(lp, filepath.Base(lp), st.Size()); err != nil {
+			a.notify("error", err.Error())
 			continue
 		}
 		name := filepath.Base(lp)
@@ -227,11 +326,30 @@ func (a *App) EnqueueDownloads(items []DownloadItem, dir string, keepTree bool) 
 	if !ok {
 		return nil, errors.New("未知的下载器：" + set.Downloader)
 	}
+	// 前置策略校验：操作名、远端源路径、下载落盘沙箱（KUAKE_DOWNLOAD_DIR）。
+	g := loadGuardConfig()
+	if err := g.checkOp("download"); err != nil {
+		return nil, err
+	}
+	if err := g.checkDownloadTarget(absBase); err != nil {
+		return nil, err
+	}
 
 	out := make([]TaskDTO, 0, len(items))
 	var lastErr error
 	for _, it := range items {
 		if it.Fid == "" {
+			continue
+		}
+		if err := g.checkRemotePath(it.RemotePath); err != nil {
+			a.notify("error", err.Error())
+			lastErr = err
+			continue
+		}
+		// 远端返回的文件名视为不可信输入：拒绝路径穿越，
+		// 否则恶意分享里的 ../../ 可把文件写到下载目录之外。
+		if err := checkRemoteFileName(it.Name); err != nil {
+			a.notify("error", err.Error())
 			continue
 		}
 		name := strings.TrimSpace(it.Name)
