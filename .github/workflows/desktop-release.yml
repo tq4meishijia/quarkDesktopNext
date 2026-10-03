@@ -239,31 +239,39 @@ jobs:
           EXPECT="${{ needs.version.outputs.version }}"
           echo "期望版本号: $EXPECT"
 
-          # 定位可执行文件。
-          # macOS 上 wails 产出 <name>.app 目录，可执行文件在其 Contents/MacOS/ 内。
-          # 注意：不能用 ".../Contents/MacOS/*" 这样的通配符字符串直接给
-          # `[ -e ]` 判断 —— 变量里的 * 不会被展开，测试恒为假。
-          # 必须先用数组展开 glob。
-          if [ "${{ matrix.goos }}" = "darwin" ]; then
-            APP="$(find build/bin -maxdepth 1 -name '*.app' -print -quit)"
-            if [ -z "$APP" ] || [ ! -d "$APP" ]; then
-              echo "::error::未找到 .app 包：$APP"; exit 1
-            fi
-            # shopt -s nullglob：glob 无匹配时数组为空，而不是留下字面量 "*"
+          # 定位产物。用不带平台分支的通用逻辑 —— 之前假设 macOS 产出
+          # .app 包目录，但 `wails build -o "$NAME"`（NAME 不含 .app）实际产出
+          # 的是与 NAME 同名的**无扩展名可执行文件**，假设错误导致两个 macOS
+          # 平台全部误判失败。
+          #
+          # 兼容两种形态：
+          #   1) build/bin/<NAME>            —— 当前的实际产出（各平台一致）
+          #   2) build/bin/<NAME>.app/Contents/MacOS/<x> —— 若 wails 改为产出包
+          BINS=()
+          EXPECTED="build/bin/${{ steps.compile.outputs.name }}"
+          if [ -f "$EXPECTED" ]; then
+            BINS+=("$EXPECTED")
+          fi
+          if [ -d "$EXPECTED.app" ]; then
             shopt -s nullglob
-            BINS=("$APP"/Contents/MacOS/*)
+            for f in "$EXPECTED.app"/Contents/MacOS/*; do
+              BINS+=("$f")
+            done
             shopt -u nullglob
-            if [ "${#BINS[@]}" -eq 0 ]; then
-              echo "::error::.app 包内未找到可执行文件：$APP/Contents/MacOS/"; exit 1
-            fi
-          else
-            BINS=()
+          fi
+
+          # 兜底：若按名字没找到（wails 可能追加平台后缀），
+          # 退回扫描 build/bin 下的可执行文件。
+          if [ "${#BINS[@]}" -eq 0 ]; then
             while IFS= read -r f; do
               BINS+=("$f")
-            done < <(find build/bin -maxdepth 1 -type f ! -name '*.dSYM')
-            if [ "${#BINS[@]}" -eq 0 ]; then
-              echo "::error::build/bin 下未找到可执行文件"; exit 1
-            fi
+            done < <(find build/bin -maxdepth 1 -type f ! -name '*.dSYM' ! -name '*.zip')
+          fi
+
+          if [ "${#BINS[@]}" -eq 0 ]; then
+            echo "::error::build/bin 下未找到产物（期望 $EXPECTED）"
+            ls -la build/bin/ || true
+            exit 1
           fi
 
           # 逐个检查：任一产物含版本号即通过。
