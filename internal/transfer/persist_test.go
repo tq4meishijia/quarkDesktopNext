@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -253,4 +254,80 @@ func TestCloseIdempotent(t *testing.T) {
 	m.Stop()
 	// 再次调用不应 panic
 	m.store.close()
+}
+
+// TestPersisterCloseDuringDebounce 验证去抖期间 close() 不会死锁。
+//
+// 回归测试：去抖循环里曾写 "if !t.Stop() { <-t.C }"。当计时器已到期、
+// 值已被外层 select 消费过时，t.C 已空，`<-t.C` 会永久阻塞 —— 而
+// close() 正在同一时刻关闭 p.done，这段代码就成了协程的最后动作，
+// 表现为 Stop() 挂死。
+//
+// 这是**逻辑死锁**而非数据竞争，-race 检测不到，只能用测试锁定。
+func TestPersisterCloseDuringDebounce(t *testing.T) {
+	dir := t.TempDir()
+	p := newPersister(filepath.Join(dir, "s.json"), true)
+	p.snapshot = func() *persistedState {
+		return &persistedState{Version: currentPersistVersion}
+	}
+	p.start()
+
+	// 连续 mark 制造密集变化，使去抖循环反复 Reset 计时器。
+	for i := 0; i < 200; i++ {
+		p.mark()
+	}
+	// 在去抖窗口内关闭，与计时器到期竞争。
+	time.Sleep(20 * time.Millisecond)
+	p.close()
+
+	// close 必须在 5 秒内返回，否则说明又死锁了。
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.close() // 幂等
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close() 死锁：去抖循环阻塞在计时器重置上")
+	}
+}
+
+// TestPersisterCloseRaceWithMark 并发 mark 与 close 不应 panic 或卡死。
+func TestPersisterCloseRaceWithMark(t *testing.T) {
+	dir := t.TempDir()
+	for round := 0; round < 20; round++ {
+		p := newPersister(filepath.Join(dir, "s.json"), true)
+		p.snapshot = func() *persistedState {
+			return &persistedState{Version: currentPersistVersion}
+		}
+		p.start()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				p.mark()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			time.Sleep(time.Duration(round) * time.Millisecond)
+			p.close()
+		}()
+		waitDone(t, &wg, 5*time.Second)
+	}
+}
+
+// waitDone 等待 WaitGroup，带超时以免测试整体挂死。
+func waitDone(t *testing.T, wg *sync.WaitGroup, d time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("并发操作在 %v 内未完成（可能死锁）", d)
+	}
 }

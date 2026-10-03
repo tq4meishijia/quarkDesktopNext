@@ -89,17 +89,23 @@ jobs:
 
       # 竞态检测：-race 依赖 CGO，只能在 Linux 上跑。
       #
-      # 加 -v 是为了让失败用例的断言信息直接出现在 Actions 日志里 ——
-      # 竞态报告本身很长，默认输出下容易被淹没，反而看不出是哪个包失败。
-      - name: Race detector
-        run: go test -race -count=1 -timeout 300s -v ./... 2>&1 | tee -a race-desktop.log
-      - name: Race detector (desktop) summary
+      # 这是全项目唯一执行竞态检测的地方（发布流水线不再重复，见
+      # desktop-release.yml 的说明）。合并到 main 之前即会运行，
+      # 因此发布所基于的代码必然已通过竞态检测。
+      #
+      # 用 -v 是为了让失败用例出现在日志里（竞态报告很长，默认输出下
+      # 看不出是哪个包失败）。日志落盘后统一提取关键行。
+      - name: Race detector (desktop)
+        run: |
+          set -o pipefail
+          go test -race -count=1 -timeout 300s -v ./... 2>&1 | tee race-desktop.log
+      - name: Race detector (desktop) 诊断输出
         if: failure()
         run: |
           echo "==== 失败用例 ===="
-          grep -E "^(--- FAIL|FAIL|panic|WARNING: DATA RACE)" race-desktop.log | head -40 || true
-          echo "==== 数据竞争详情（前 80 行）===="
-          grep -A 12 "WARNING: DATA RACE" race-desktop.log | head -80 || true
+          grep -E "^(--- FAIL|FAIL|panic:)" race-desktop.log | head -40 || true
+          echo "==== 数据竞争详情（前 120 行）===="
+          grep -A 15 "WARNING: DATA RACE" race-desktop.log | head -120 || true
 
       - name: Race detector (quark-cil)
         working-directory: quark-cil

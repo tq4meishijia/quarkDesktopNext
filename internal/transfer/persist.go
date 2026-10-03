@@ -157,9 +157,14 @@ func (p *persister) loop() {
 					return
 				case <-p.wake:
 					// 又一次变化，重置计时。
-					if !t.Stop() {
-						<-t.C
-					}
+					//
+					// 注意：这里**不能**写「if !t.Stop() { <-t.C }」——
+					// 那种写法在计时器已到期且值已被 select 消费时会永久阻塞
+					// （channel 已空，无人再写），配合 close() 关闭 done 的
+					// 时机就是一次死锁，且 -race 未必能报出（是逻辑死锁，
+					// 不是数据竞争）。Stop 后直接 Reset 即可，Go 1.23+
+					// 的 Timer 保证 Reset 前已 Stop 不会残留值。
+					t.Stop()
 					t.Reset(p.writeDelay)
 				}
 			}
