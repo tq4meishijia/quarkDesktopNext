@@ -175,7 +175,10 @@ try {
   // ---- 窄窗口 ----
   await page.setViewport({ width: 460, height: 780 });
   await wait(600);
-  ok('窄窗口渲染', (await count('.filetable, .filegrid, .empty')) >= 0);
+  // 原断言写作 `>= 0`，恒为真、等于没检查。
+  // 窄窗口下必须仍能看到文件区或空态之一，否则布局在窄宽度下是坏的。
+  ok('窄窗口渲染', (await count('.filetable, .filegrid, .empty')) > 0,
+     'narrow-visible=' + (await count('.filetable, .filegrid, .empty')));
   await page.setViewport({ width: 1280, height: 860 });
   await wait(400);
 } catch (err) {

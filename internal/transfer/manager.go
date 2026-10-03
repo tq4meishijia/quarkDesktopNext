@@ -10,6 +10,7 @@ package transfer
 import (
 	"context"
 	"errors"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -20,7 +21,21 @@ var ErrNotFound = errors.New("任务不存在")
 
 // ErrHandedOff 由 Runner 返回，表示任务已交给外部下载器，本进程停止跟踪。
 // Manager 会把它落成「已移交」终态，而不是失败。
+//
+// 注意：internal/engine 也有一个同名同文案的 ErrHandedOff。Runner 实现必须
+// 用本包的 ErrHandedOff（或显式做 errors.Is 桥接）返回，否则 Manager 匹配不到，
+// 任务会被误判为「失败」。
 var ErrHandedOff = errors.New("已移交给外部下载器")
+
+// ErrPaused 由 Runner 返回，表示本次搬运是因用户暂停而中断，不是失败。
+// Manager 遇到它会把任务放回「暂停」态并让出并发槽位，等待 Resume 重新调度。
+//
+// 为什么需要这个哨兵：内建下载器在暂停时通过 Gate 中断当前请求并返回，
+// 若把它当成失败，任务会被错记为 failed 且再也续传不了。
+var ErrPaused = errors.New("任务已暂停")
+
+// maxConcurrency 是并行度硬上限，与 SetConcurrency 的钳制保持一致。
+const maxConcurrency = 16
 
 // Manager 是传输队列的调度中心：
 //   - 固定数量的 worker 从 queue 取任务；
@@ -37,10 +52,13 @@ type Manager struct {
 	last   map[string]time.Time
 
 	queue  chan *Task
-	sem    chan struct{}
+	gate   *slotGate
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 	once   sync.Once
+
+	// store 负责任务落盘与恢复；为 nil 时纯内存运行。
+	store *persister
 }
 
 type sample struct {
@@ -57,7 +75,7 @@ func NewManager(runner Runner, emit func(*Task)) *Manager {
 		sample: make(map[string]sample),
 		last:   make(map[string]time.Time),
 		queue:  make(chan *Task, 1024),
-		sem:    make(chan struct{}, 1),
+		gate:   newSlotGate(1),
 		stopCh: make(chan struct{}),
 	}
 	m.SetConcurrency(1)
@@ -76,23 +94,89 @@ func (m *Manager) Start(maxWorkers int) {
 	}
 }
 
-// SetConcurrency 运行时调整并行数（1-16）。已在进行中的任务不受影响。
+// EnablePersistence 开启任务持久化：statePath 为落盘文件路径。
+//
+// 必须在 Start 之前调用。开启后：
+//   - 每次任务状态变化会（去抖后）异步落盘；
+//   - Stop 时做最后一次同步落盘；
+//   - 可用 RestoreTasks 读回上次残留的任务。
+func (m *Manager) EnablePersistence(statePath string) {
+	m.store = newPersister(statePath, true)
+	m.store.snapshot = m.persistSnapshot
+	m.store.start()
+}
+
+// RestoreTasks 读回上次残留的任务，全部标记为「已中断」等待用户续传。
+//
+// 不自动续传的理由：重启后立刻发起大量网络请求会消耗流量/费用，
+// 且违背「用户点开始才下载」的预期。
+//
+// 返回读到的任务数。文件不存在或损坏时返回 0。
+func (m *Manager) RestoreTasks() int {
+	if m.store == nil {
+		return 0
+	}
+	items := m.store.load()
+	n := 0
+	for _, it := range items {
+		// 只恢复可续传的任务：上传需本地文件仍存在，下载只需 fid。
+		if it.Kind == "upload" {
+			if it.LocalPath == "" {
+				continue
+			}
+			if _, err := os.Stat(it.LocalPath); err != nil {
+				// 本地源文件已被删除/移动，无法续传，跳过。
+				continue
+			}
+		}
+		if it.Kind == "download" && it.Dest == "" {
+			continue
+		}
+		t := restoreTask(it)
+		m.mu.Lock()
+		m.tasks[t.ID] = t
+		m.order = append(m.order, t.ID)
+		m.mu.Unlock()
+		n++
+	}
+	if n > 0 {
+		// 一次性推全量快照，让前端立刻看到历史任务。
+		for _, t := range m.List() {
+			m.push(t, true)
+		}
+	}
+	return n
+}
+
+// persistSnapshot 导出当前任务快照（由 persister 调用）。
+func (m *Manager) persistSnapshot() *persistedState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	st := &persistedState{Version: currentPersistVersion}
+	for _, id := range m.order {
+		t, ok := m.tasks[id]
+		if !ok {
+			continue
+		}
+		st.Tasks = append(st.Tasks, t.toPersisted())
+	}
+	return st
+}
+
+// SetConcurrency 运行时调整并行数（1-16）。已在进行中的任务不受影响：
+// 调大后立即有新的 acquire 通过，调小则等在途任务自然结束才真正降下来。
 func (m *Manager) SetConcurrency(n int) {
-	if n < 1 {
-		n = 1
-	}
-	if n > 16 {
-		n = 16
-	}
-	m.mu.Lock()
-	m.sem = make(chan struct{}, n)
-	m.mu.Unlock()
+	m.gate.setLimit(n)
 }
 
 // Stop 停止调度并等待 worker 退出；不等待在途任务完成，调用方应先自行取消。
 func (m *Manager) Stop() {
 	m.once.Do(func() { close(m.stopCh) })
 	m.wg.Wait()
+	// 最后同步落盘一次，保证退出前的状态不丢。
+	if m.store != nil {
+		m.store.close()
+	}
 }
 
 func (m *Manager) worker() {
@@ -102,29 +186,25 @@ func (m *Manager) worker() {
 		case <-m.stopCh:
 			return
 		case t := <-m.queue:
-			m.acquire()
+			// 槽位是并发额度的唯一载体：暂停会让出槽位，好让别的任务顶上，
+			// 否则「暂停全部任务」会把并发额度耗光，新任务永久排队。
+			if !m.gate.acquire(m.stopCh) {
+				return
+			}
 			if t.Status() == StatusCancelled {
-				m.release()
+				m.gate.release()
+				continue
+			}
+			// 取出时若已被暂停，直接让出槽位等 Resume 重新入队，
+			// 不做任何搬运，也不改状态（状态由 Pause/Resume 负责）。
+			if t.Gate().Paused() {
+				m.gate.release()
 				continue
 			}
 			m.run(t)
-			m.release()
+			m.gate.release()
 		}
 	}
-}
-
-func (m *Manager) acquire() {
-	m.mu.RLock()
-	sem := m.sem
-	m.mu.RUnlock()
-	sem <- struct{}{}
-}
-
-func (m *Manager) release() {
-	m.mu.RLock()
-	sem := m.sem
-	m.mu.RUnlock()
-	<-sem
 }
 
 // Enqueue 入队一个新任务并立即返回其 ID 快照。
@@ -142,6 +222,10 @@ func (m *Manager) Enqueue(s Spec) *Task {
 	return t
 }
 
+// run 搬运一个任务直到终态。
+//
+// 暂停的处理：Runner 在暂停时返回 ErrPaused（内建下载器由 Gate 中断当前请求），
+// 此时任务回到 paused 态、进度保留，等待 Resume 重新入队续传。
 func (m *Manager) run(t *Task) {
 	t.setStatus(StatusRunning)
 	m.push(t, true)
@@ -166,6 +250,9 @@ func (m *Manager) run(t *Task) {
 	m.mu.Unlock()
 
 	switch {
+	case errors.Is(err, ErrPaused):
+		// 用户主动暂停：不是失败，也不算结束，保持可续传状态。
+		t.setStatus(StatusPaused)
 	case errors.Is(err, ErrHandedOff):
 		// 外部下载器已接管：不是失败，进度不再由本进程汇报。
 		t.setStatus(StatusHandedOff)
@@ -221,6 +308,11 @@ func (m *Manager) onProgress(t *Task, done int64) error {
 
 // push 向 UI 推送任务快照。force=true 表示状态变化，跳过节流。
 func (m *Manager) push(t *Task, force bool) {
+	// 这里同时是状态变化的统一出口，因此落盘触发点也放在这：
+	// force=true 时标记一次 dirty，由 persister 去抖写盘。
+	if force && m.store != nil {
+		m.store.mark()
+	}
 	if m.emit == nil {
 		return
 	}
@@ -303,7 +395,7 @@ func (m *Manager) Cancel(id string) error {
 		return nil
 	}
 	t.Gate().Set(false) // 先解除暂停，避免 Runner 卡在闸门里收不到取消信号
-	t.cancel()
+	t.requestCancel()
 	t.setStatus(StatusCancelled)
 	m.push(t, true)
 	return nil
@@ -321,11 +413,13 @@ func (m *Manager) Retry(id string) error {
 	if st != StatusFailed && st != StatusCancelled {
 		return errors.New("只有失败或已取消的任务可以重试")
 	}
+	// 换新的 ctx / cancel / gate：旧 Runner 可能还持有旧 ctx 的引用，
+	// 复用同一个闸门会让「上次遗留的暂停位」影响本次重试。
+	t.mu.Lock()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.ctx = ctx
 	t.cancel = cancel
-	t.gate.Set(false)
-	t.mu.Lock()
+	t.gate = NewGate()
 	t.done = 0
 	t.errMsg = ""
 	t.finishedAt = time.Time{}
@@ -383,7 +477,7 @@ func (m *Manager) CancelAll() int {
 			continue
 		}
 		t.Gate().Set(false)
-		t.cancel()
+		t.requestCancel()
 		t.setStatus(StatusCancelled)
 		m.push(t, true)
 		n++

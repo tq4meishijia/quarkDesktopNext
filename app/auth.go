@@ -99,6 +99,9 @@ func (a *App) invalidateSession(reason string) error {
 	a.requireFreshLogin = true
 	a.mu.Unlock()
 
+	// 会话已失效，停掉后台探测（重新登录成功后会自动重启）。
+	a.stopSessionWatch()
+
 	// SaveCredentials 传空值时走 os.Remove 分支，删掉整个 session.json。
 	if err := a.store.SaveCredentials(configCredentialsEmpty()); err != nil {
 		return err

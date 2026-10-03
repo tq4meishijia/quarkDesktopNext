@@ -103,7 +103,8 @@ func resolveDest(dir, name, policy string) (string, error) {
 }
 
 // uniqueRemoteDir 把网盘目录映射到本地子目录（保留目录层级）。
-// 用 "全角_" 前缀是网盘里真实存在的目录名，避免和数字序号混淆。
+// 每一段都经 cleanFileName 清洗，因此网盘里的非法字符（:、*、设备名等）
+// 不会在本地建出无法访问的目录。
 func uniqueRemoteDir(base, remoteDir string) string {
 	remoteDir = strings.Trim(strings.TrimSpace(remoteDir), "/")
 	if remoteDir == "" {

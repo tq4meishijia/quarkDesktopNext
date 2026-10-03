@@ -63,6 +63,118 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # 竞态检测：只在 Linux 上跑（-race 依赖 CGO，Windows/macOS runner 上不可用）
+  #
+  # 为什么必须有这个 job：transfer 包的信号量、Gate 广播、Task 字段锁
+  # 都是手写并发结构，go test 不开 -race 检测不到数据竞争。
+  # 上游 loginproxy 曾用「并发压测兜底」代替 race（见其 proxy_test.go 注释），
+  # 现在改为在 CI 上直接跑 race detector。
+  # ---------------------------------------------------------------------------
+  race:
+    name: race (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            go.sum
+            quark-cil/go.sum
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Race detector
+        run: go test -race -count=1 -timeout 300s ./...
+
+      - name: Race detector (quark-cil)
+        working-directory: quark-cil
+        run: go test -race -count=1 -timeout 300s ./...
+
+  # ---------------------------------------------------------------------------
+  # 前端校验：零构建项目同样需要守门
+  #
+  # 前端是原生 ES Module（无 package.json / 无 bundler），因此不需要
+  # npm ci，但语法错误与冒烟回归过去只能靠本地手动跑。
+  # 这里把两个既有脚本接进 CI。
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: ESM syntax check
+        # vm.SourceTextModule 是实验 API，必须带该标志；
+        # 脚本内置可用性探测，缺失时会以退出码 2 明确失败而非假通过。
+        run: node --experimental-vm-modules scripts/check-frontend-syntax.mjs
+
+      - name: Verify README tree matches filesystem
+        run: python3 scripts/verify-readme-tree.py
+
+      - name: Runtime smoke test
+        # 需要系统自带 Chrome/Chromium；缺失时脚本自行跳过。
+        run: node scripts/smoke.mjs
+
+  # ---------------------------------------------------------------------------
+  # 真实构建：go build 不能保证能产出可执行文件
+  #
+  # go build 不链接 Wails 的 WebView2 / webkit2gtk 平台层，
+  # 因此「编译通过」不等于「能构建出桌面程序」。这个 job 跑真正的
+  # wails build，并校验产物存在。
+  # ---------------------------------------------------------------------------
+  desktop-build:
+    name: desktop build (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            go.sum
+            quark-cil/go.sum
+
+      - name: Install Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libwebkit2gtk-4.1-dev build-essential pkg-config
+
+      - name: Download modules
+        run: go build ./...
+
+      # Ubuntu 24.04 只提供 webkit2gtk-4.1，缺这个 tag 会构建失败
+      # （见 HANDOFF §7.5 第 33 条）。
+      - name: Wails build
+        run: wails build -platform linux/amd64 -tags webkit2_41 -clean
+
+      - name: Verify artifact exists
+        run: |
+          set -e
+          if [ ! -f build/bin/kuake-desktop ]; then
+            echo "未找到构建产物 build/bin/kuake-desktop"
+            ls -la build/bin/ || true
+            exit 1
+          fi
+          ls -la build/bin/
+
+  # ---------------------------------------------------------------------------
   # quark-cil 上游 CLI 模块（随仓库分发的依赖源码，用于保证 replace 目标可用）
   # ---------------------------------------------------------------------------
   quark-cil:
@@ -107,14 +219,19 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
-    needs: [desktop, quark-cil]
+    needs: [desktop, quark-cil, race, frontend, desktop-build]
     if: always()
     steps:
       - name: Check matrix results
         run: |
-          if [ "${{ needs.desktop.result }}" != "success" ] || \
-             [ "${{ needs.quark-cil.result }}" != "success" ]; then
-            echo "desktop=${{ needs.desktop.result }}, quark-cil=${{ needs.quark-cil.result }}"
+          status=0
+          for r in desktop quark-cil race frontend desktop-build; do
+            if [ "${{ needs.$r.result }}" != "success" ]; then
+              echo "$r=${{ needs.$r.result }}"
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
             exit 1
           fi
           echo "全部构建与检查通过"

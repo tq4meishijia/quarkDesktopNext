@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"sync"
 )
 
@@ -107,6 +108,9 @@ func Load() *Store {
 		if json.Unmarshal(raw, &c) == nil {
 			s.cred = c
 		}
+		// 旧版本写下的 session.json 只靠 0600 保护，在 Windows 上不生效。
+		// 加载时补做一次访问控制收紧，不必等用户重新登录。
+		secureSessionFileOnLoad(filepath.Join(dir, sessionFile))
 	}
 	return s
 }
@@ -169,7 +173,7 @@ func (s *Store) UpdateSettings(v Settings) error {
 	s.sets = sanitize(v)
 	snapshot := s.sets
 	s.mu.Unlock()
-	return s.writeJSON(settingsFile, snapshot, 0o644)
+	return s.writeJSON(settingsFile, snapshot, 0o644, false)
 }
 
 // Credentials 返回已保存的会话凭证。
@@ -180,6 +184,9 @@ func (s *Store) Credentials() Credentials {
 }
 
 // SaveCredentials 写入会话凭证（0600）；cookie 为空表示登出，直接删除文件。
+//
+// 权限说明：0600 在 POSIX 上由内核强制执行；Windows 上权限位不表达 ACL，
+// 因此额外调用 hardenSessionFile 收紧 DACL（见 secure_windows.go）。
 func (s *Store) SaveCredentials(c Credentials) error {
 	s.mu.Lock()
 	s.cred = c
@@ -188,10 +195,16 @@ func (s *Store) SaveCredentials(c Credentials) error {
 		_ = os.Remove(filepath.Join(s.dir, sessionFile))
 		return nil
 	}
-	return s.writeJSON(sessionFile, c, 0o600)
+	return s.writeJSON(sessionFile, c, 0o600, true)
 }
 
-func (s *Store) writeJSON(name string, v any, perm os.FileMode) error {
+// writeJSON 把 v 原子地写入 name。
+//
+// 先写同目录下的临时文件再 rename，避免 truncate-then-write 在崩溃或
+// 并发写入时留下半截 JSON（配置解析失败会静默回落默认值，用户会莫名丢设置）。
+// rename 在同一目录内是原子操作；Windows 上 os.Rename 不能覆盖已存在文件，
+// 故先删除目标再改名。
+func (s *Store) writeJSON(name string, v any, perm os.FileMode, sensitive bool) error {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return err
 	}
@@ -199,5 +212,47 @@ func (s *Store) writeJSON(name string, v any, perm os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.dir, name), raw, perm)
+	final := filepath.Join(s.dir, name)
+	tmp, err := os.CreateTemp(s.dir, "."+name+".tmp*")
+	if err != nil {
+		// 退化：临时文件不可用时回落到直接写，保证功能不中断。
+		return os.WriteFile(final, raw, perm)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		// 任何失败路径都清掉临时文件，不留垃圾。
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// 临时文件的权限由 CreateTemp 以 0600 创建，符合最严要求。
+	if err := os.Chmod(tmpName, perm); err != nil && goruntime.GOOS != "windows" {
+		// POSIX 上失败要报错；Windows 上 Chmod 语义不同，忽略。
+		return err
+	}
+	if sensitive {
+		// 收紧在改名之前做：此时临时文件已存在且内容已落盘。
+		// ACL 收紧失败不阻断：内容已受限在 0600（POSIX）或由父目录 ACL 兜底。
+		_ = hardenSessionFile(tmpName)
+	}
+	if err := os.Rename(tmpName, final); err != nil {
+		// Windows 上目标存在时 Rename 失败，先删再改。
+		if rerr := os.Remove(final); rerr != nil {
+			return err
+		}
+		if rerr := os.Rename(tmpName, final); rerr != nil {
+			return rerr
+		}
+	}
+	return nil
 }

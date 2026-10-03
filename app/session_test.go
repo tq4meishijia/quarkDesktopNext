@@ -156,7 +156,7 @@ func TestAuthStatusReportsInvalidReason(t *testing.T) {
 	}
 }
 
-// mustNewClient 造一个已登录客户端；凭证非法时 SDK 会 panic，这里直接跳过。
+// mustNewClient 造一个已登录客户端；凭证非法时 SDK 会 panic，newClient 会转成 error。
 func mustNewClient(t *testing.T, cookie string) *sdk.QuarkClient {
 	t.Helper()
 	qc, err := newClient(cookie)

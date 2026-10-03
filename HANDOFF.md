@@ -714,16 +714,16 @@ e9adc97  feat: 初始化 quarkDesktopNext 仓库（目录重构 + 开源合规�
 | --- | --- | --- | --- |
 | 1 | **上传文件夹** | `app/transfer.go:182` | 当前选到目录直接 `notify("warn", "暂不支持上传整个文件夹")` 后 `continue`。需递归遍历 + 保持目录结构（对应 `docs/FEATURE-IMPL-PROMPT.md` B2） |
 | 2 | **下载文件夹** | `app/files.go` | 当前提示"文件夹需要打包后才能下载，暂不支持"。需先打包（zip）再下载，或递归建目录 |
-| 3 | **接入 `internal/guard` 前置校验** | `app/files.go` `transfer.go` | ⚠️ **安全缺口**。`quark-cil/internal/guard` 实现了完整黑名单与沙箱，但 grep 确认在 `app/`、`internal/`、`main.go` 中**零引用**。`Delete`/`Move`/`Copy`/`Enqueue*` 等危险操作**无任何前置校验** |
+| 3 | ~~**接入 `internal/guard` 前置校验**~~ | ✅ 已完成（2026-10-03）：因 Go internal 规则无法 import 上游 guard，改为在 `app/guard.go` 自有实现等价规则，已接入 `Delete`/`Move`/`Copy`/`EnqueueUploads`/`EnqueueDownloads` + 远端文件名穿越拦截。**双实现需手工同步**，见 §6.5 M1 |
 | 4 | **分享列表翻页** | `app/share.go:48` | `GetShareList(pwdID, stoken, "0", 1, 100, ...)` 写死单页 100 条，超出**静默丢弃且无提示**（B1） |
-| 5 | **任务队列持久化** | `internal/transfer` | 应用重启后任务全丢（C1）。需落盘 + 恢复时校验 URL/大小/已完成分片 |
-| 6 | **会话失效自动检测** | `app/auth.go` | `sdk.checkAuth()` 失败后错误直接冒泡。`HandleSessionInvalid` 绑定已存在但**无自动触发**，需前端在上报 401/鉴权失败时调用 |
+| 5 | ~~**任务队列持久化**~~ | ✅ 已完成（2026-10-03）：落盘 `<配置目录>/transfer-tasks.json`，原子写 + 版本号 + 损坏容错。**恢复后不自动续传**（统一置 paused 等待手动 Resume），见 §6.5 M8 |
+| 6 | ~~**会话失效自动检测**~~ | ✅ 已完成（2026-10-03）：`app/session_watch.go` 双路径 —— 后台每 5 分钟探测 `GetUserInfo` + 业务失败经 `a.respErr` 即时判定。**误判会把用户踢下线**，见 §6.5 M9 |
 
 ### 6.2 中优先级（体验与可配置性）
 
 | # | 事项 | 说明 |
 | --- | --- | --- |
-| 7 | **系统托盘 + 启动最小化** | `Settings.StartMinimized` 有字段、有前端 UI，但 `main.go` **无 `SystemTray`、无 `OnBeforeClose`**，Go 侧零消费点 —— 是**空开关**。需真正实现（C2） |
+| 7 | **系统托盘 + 启动最小化** | `Settings.StartMinimized` **只有字段与默认值**（`app.js` / `mock.js` / `settings.js` 的默认值里各有一处，**无任何 UI 控件**），`main.go` 无 `SystemTray` / `OnBeforeClose`，Go 侧零消费点 —— 是**完全的空开关**。需实现 UI + 托盘（C2） |
 | 8 | **自定义分享提取码** | SDK 有 `SetSharePassword`，但 `CreateShareLink` 只接受 `needPasscode bool`，无法设置具体密码（B3） |
 | 9 | **搜索阈值可配** | `searchMaxDepth=5` / `searchMaxNodes=3000` / `searchMaxHits=300` 三常量硬编码（B7） |
 | 10 | **任务显示上传策略与秒传标识** | `TaskDTO` 无 `Policy` 字段、无比传标识，任务列表无法区分（B8 / A3） |
@@ -737,9 +737,26 @@ e9adc97  feat: 初始化 quarkDesktopNext 仓库（目录重构 + 开源合规�
 | --- | --- | --- |
 | 14 | **`main.go` 补 `var version`** | `build.ps1 -Version` 的 `-ldflags "-X main.version=..."` **仅当 `main.go` 声明了 `var version` 才生效**，当前 48 行的 `main.go` 没有 → 本地构建目前**静默跳过版本注入**，exe 不带版本号 |
 | 15 | **`wails.json` 补 `info` 段** | 当前无 `info`，`build/windows/info.json` 的 `{{.Info.ProductVersion}}` / `{{.Info.CompanyName}}` / `{{.Info.Copyright}}` **全部渲染为空**，exe 属性无产品名/版本/版权 |
-| 16 | **前端检查接入 CI** | `check-frontend-syntax.mjs` 与 `smoke.mjs` 均未接入 CI，前端回归只能靠本地手动跑 |
+| 16 | ~~**前端检查接入 CI**~~ | ✅ 已完成（2026-10-03）：`ci.yml` 新增 `frontend` job（ESM 语法 + README 树 + 运行时冒烟）。**注意** `check-frontend-syntax.mjs` 需 `--experimental-vm-modules`，已内置可用性探测 |
 | 17 | **给 `build.sh` 加 `webkit2_41`** | 该 tag 目前**只在 `desktop-release.yml` 传**，本地在 Ubuntu 24.04 构建会失败 |
-| 18 | **补 `internal/transfer` 与 `app/files.go` 测试** | 这两处是零覆盖 + 高改动风险的组合 |
+| 18 | ~~**补 `internal/transfer` 与 `app/files.go` 测试**~~ | ✅ 已完成（2026-10-03）：`internal/transfer` 24 个用例（并发/暂停/持久化）、`internal/config` 13 个、`app` 37 个，全项目 130 个 |
+
+### 6.5 后续维护必读（本轮修复引入的约束）
+
+以下几条**不是待办，而是已实现方案的约束**。改动相关代码前必读，否则容易改回旧问题或做出错误假设。
+
+| # | 约束 | 原因与后果 |
+| --- | --- | --- |
+| **M1** | **`app/guard.go` 与 `quark-cil/internal/guard` 是两份独立实现** | Go **禁止**跨 module import `internal/` 包（实测报 `use of internal package ... not allowed`），所以桌面端无法复用上游 guard，只能自行实现等价规则。**上游 guard 新增规则时桌面端不会自动同步**，需手工比对两边清单 |
+| **M2** | **不要用「channel 容量」表达并发上限** | 旧实现用 `m.sem = make(chan, n)`，acquire/release 跨窗口时必然死锁。现为 `slotGate`（锁保护整数 + broadcast channel）。改回 channel 方案会重新引入 P0 缺陷 |
+| **M3** | **暂停必须让出并发槽位** | Runner 遇暂停返回 `transfer.ErrPaused`（不是失败），`run()` 落成 paused 态并让槽。若把 `ErrPaused` 当失败处理，任务会丢续传状态 |
+| **M4** | **`Gate.Wait` 暂停时返回 `ErrPaused` 而非 nil** | 调用方靠这个区分「用户暂停」与「真失败」。注意 http 层会把它包成 `%v`，故 `app/transfer.go` 有 `normalizeEngineError` 做文本兜底 |
+| **M5** | **下载直链的 SSRF 校验是 fail-closed** | `app/urlguard.go` 对 DNS 解析失败**直接拒绝**（重试一次后放弃）。这是安全策略，不要改成 fail-open。若确实影响离线环境，须先与用户确认 |
+| **M6** | **内建与外部下载器的 Cookie 不同** | 内建走 `cookieHeader`（完整凭证），外部走 `downloadCookieHeader`（白名单，剔除 `__pus` 账号登录态）。**不可统一成白名单**，否则外部下载器大量失效 |
+| **M7** | **Windows 上 `session.json` 有真实 DACL** | `0600` 在 NTFS 上不表达 ACL，故 `secure_windows.go` 额外设 `PROTECTED_DACL`。该文件用 `golang.org/x/sys/windows`（本就在 go.mod 依赖图中，版本 v0.30.0，**不得升级大版本**） |
+| **M8** | **任务持久化文件** | `<配置目录>/transfer-tasks.json`。恢复后**不自动续传**，统一置 paused 等待用户手动 Resume（避免重启即发起大量网络请求）。上传任务若本地源文件已消失会被跳过 |
+| **M9** | **会话失效现在有 Go 侧自动检测** | `app/session_watch.go` 每 5 分钟探测 + 业务失败即时判定（经 `a.respErr`）。**判定必须严格**：`TestAuthRejectedFalsePositives` 覆盖了「网络错误/业务错误不得误判为失效」，改动该逻辑务必跑这几个用例 |
+| **M10** | **不要在 SDK 侧加导出** | `session_watch.go` 用公开 API `GetUserInfo` 实现，因 SDK 的 `checkAuth` 是未导出函数。若在 SDK 加导出会带来 AGPL 合并冲突 + §13 披露义务 |
 
 ### 6.4 明确不做（丁类，已在 `docs/FEATURE-IMPL-PROMPT.md` 中确认）
 
@@ -754,9 +771,9 @@ e9adc97  feat: 初始化 quarkDesktopNext 仓库（目录重构 + 开源合规�
 | # | 事项 | 说明 |
 | --- | --- | --- |
 | 1 | **AGPL 许可边界不可越线** | 根目录 MIT，但 `go.mod` 的 `replace` 指向 `./quark-cil`（AGPL-3.0），**整体分发产物必须按 AGPL-3.0**。改 `quark-cil/` 任何文件都要按第 13 条在文件顶部 + `NOTICE` 双重标注 |
-| 2 | **`internal/guard` 未接入** | 上游已实现完整黑名单与沙箱，桌面端**零引用**。危险操作无前置校验。见 §6.1 第 3 项 |
+| 2 | **guard 已在桌面端侧实现** | ✅ 上游 `quark-cil/internal/guard` 因 Go internal 规则**无法**被桌面端 import，故在 `app/guard.go` 自有实现等价规则并接入 Delete/Move/Copy/Enqueue*。两份实现需手工同步，见 §6.5 M1 |
 | 3 | **登录代理的三条边界不能松** | 仅监听 `127.0.0.1` 随机端口 / 仅白名单域名（否则 403）/ 仅登录期存活。任何放宽都会让用户机器变成开放代理 |
-| 4 | **凭证文件权限 0600** | `session.json` 权限收紧，且刻意暴露路径让用户可见可自行删除。修改时勿改成 0644 |
+| 4 | **凭证文件权限** | `session.json` 在 POSIX 上为 0600；**Windows 上额外设 DACL**（`0600` 在 NTFS 不表达 ACL，单独用无效）。刻意暴露路径让用户可见可自行删除。**修改时勿改成 0644**，见 §6.5 M7 |
 | 5 | **`.gitignore` 已覆盖凭证** | `.env` / `.mcp.json` / `*.key` / `*.pem` / `id_rsa*` 等，标注"严禁提交"。`quark-cil/` **必须**纳入版本控制（随仓库分发的上游源码），故未忽略 |
 | 6 | **夸克 Cookie 属敏感凭证** | 交互式登录捕获的是**完整** Cookie（含 HttpOnly 字段），等价于账号登录态。`NOTICE` 第五节有免责声明 |
 

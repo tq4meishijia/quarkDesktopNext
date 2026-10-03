@@ -30,7 +30,7 @@ func (a *App) ListDir(p string) (DirListing, error) {
 	if strings.TrimSpace(p) == "" {
 		p = "/"
 	}
-	items, err := listAt(qc, p)
+	items, err := a.listAt(qc, p)
 	if err != nil {
 		return DirListing{}, err
 	}
@@ -61,7 +61,7 @@ func (a *App) Search(keyword, root string, recursive bool) (DirListing, error) {
 	hits := make([]FileItem, 0, 32)
 	reachedCap := false
 
-	current, err := listAt(qc, root)
+	current, err := a.listAt(qc, root)
 	if err != nil {
 		return DirListing{}, err
 	}
@@ -94,7 +94,7 @@ func (a *App) Search(keyword, root string, recursive bool) (DirListing, error) {
 			if lv.depth > searchMaxDepth {
 				continue
 			}
-			children, lerr := listAt(qc, lv.fid)
+			children, lerr := a.listAt(qc, lv.fid)
 			if lerr != nil {
 				continue // 单个目录失败不影响整体搜索
 			}
@@ -135,7 +135,7 @@ func (a *App) CreateFolder(parent, name string) (FileItem, error) {
 	if strings.Contains(name, "/") {
 		return FileItem{}, errors.New("文件夹名称不能包含 /")
 	}
-	pdirFid, err := resolveFid(qc, parent)
+	pdirFid, err := a.resolveFid(qc, parent)
 	if err != nil {
 		return FileItem{}, err
 	}
@@ -144,7 +144,7 @@ func (a *App) CreateFolder(parent, name string) (FileItem, error) {
 		return FileItem{}, err
 	}
 	if resp == nil || !resp.Success {
-		return FileItem{}, errors.New(respMessage(resp))
+		return FileItem{}, a.respErr(resp)
 	}
 	fid := ""
 	if resp.Data != nil {
@@ -174,7 +174,7 @@ func (a *App) Rename(remotePath, newName string) (bool, error) {
 		return false, err
 	}
 	if resp == nil || !resp.Success {
-		return false, errors.New(respMessage(resp))
+		return false, a.respErr(resp)
 	}
 	return true, nil
 }
@@ -188,16 +188,25 @@ func (a *App) Delete(remotePaths []string) (int, error) {
 	if len(remotePaths) == 0 {
 		return 0, errors.New("请先选择要删除的文件")
 	}
+	// 前置策略校验：命中黑名单的路径直接拒绝，不下发到网盘。
+	g := loadGuardConfig()
+	if err := g.checkOp("delete"); err != nil {
+		return 0, err
+	}
 	ok := 0
 	var lastErr error
 	for _, p := range remotePaths {
+		if err := g.checkRemotePath(p); err != nil {
+			lastErr = err
+			continue
+		}
 		resp, derr := qc.Delete(p)
 		if derr != nil {
 			lastErr = derr
 			continue
 		}
 		if resp == nil || !resp.Success {
-			lastErr = errors.New(respMessage(resp))
+			lastErr = a.respErr(resp)
 			continue
 		}
 		ok++
@@ -231,6 +240,17 @@ func (a *App) relocate(kind, src, destDir string) (bool, error) {
 	if dirOf(src) == dest {
 		return false, errors.New("源与目标目录相同")
 	}
+	// 前置策略校验：源与目标都不允许落在被禁用的远端路径下。
+	g := loadGuardConfig()
+	if err := g.checkOp(kind); err != nil {
+		return false, err
+	}
+	if err := g.checkRemotePath(src); err != nil {
+		return false, err
+	}
+	if err := g.checkRemotePath(dest); err != nil {
+		return false, err
+	}
 	var resp *sdk.StandardResponse
 	if kind == "move" {
 		resp, err = qc.Move(src, dest)
@@ -241,7 +261,7 @@ func (a *App) relocate(kind, src, destDir string) (bool, error) {
 		return false, err
 	}
 	if resp == nil || !resp.Success {
-		return false, errors.New(respMessage(resp))
+		return false, a.respErr(resp)
 	}
 	return true, nil
 }
@@ -252,11 +272,11 @@ func (a *App) ResolveFid(remotePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return resolveFid(qc, remotePath)
+	return a.resolveFid(qc, remotePath)
 }
 
 // resolveFid 内部实现：根目录直接返回 "0"，其余走 GetFileInfo。
-func resolveFid(qc *sdk.QuarkClient, p string) (string, error) {
+func (a *App) resolveFid(qc *sdk.QuarkClient, p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" || p == "/" {
 		return "0", nil
@@ -266,7 +286,7 @@ func resolveFid(qc *sdk.QuarkClient, p string) (string, error) {
 		return "", err
 	}
 	if resp == nil || !resp.Success {
-		return "", errors.New(respMessage(resp))
+		return "", a.respErr(resp)
 	}
 	if resp.Data == nil {
 		return "", errors.New("无法解析目录 fid：返回数据为空")
@@ -279,13 +299,13 @@ func resolveFid(qc *sdk.QuarkClient, p string) (string, error) {
 }
 
 // listAt 列出某个路径或 fid 下的条目，并统一转换为 FileItem。
-func listAt(qc *sdk.QuarkClient, pathOrFid string) ([]FileItem, error) {
+func (a *App) listAt(qc *sdk.QuarkClient, pathOrFid string) ([]FileItem, error) {
 	resp, err := qc.List(pathOrFid)
 	if err != nil {
 		return nil, err
 	}
 	if resp == nil || !resp.Success {
-		return nil, errors.New(respMessage(resp))
+		return nil, a.respErr(resp)
 	}
 	raw, _ := resp.Data["list"].([]sdk.QuarkFileInfo)
 	items := make([]FileItem, 0, len(raw))
@@ -357,4 +377,14 @@ func respMessage(r *sdk.StandardResponse) string {
 		return "请求失败：" + r.Code
 	}
 	return "请求失败"
+}
+
+// respErr 构造业务失败错误，并顺带判定是否由会话失效引起。
+//
+// 会话失效时（凭证静默过期、接口权限变化）走 invalidateSession 统一收口：
+// 内存态清空 + 删 session.json + 推 auth:changed 事件，
+// 前端据此跳回登录页，无需自己识别错误文案。
+func (a *App) respErr(resp *sdk.StandardResponse) error {
+	a.noteAuthFailure(resp, nil)
+	return errors.New(respMessage(resp))
 }

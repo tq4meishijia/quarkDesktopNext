@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +54,9 @@ type App struct {
 	// 清除凭证后浏览器里那份旧 Cookie 仍在，不加这个标记会直接跳过登录。
 	requireFreshLogin bool
 
+	// watcher 是会话有效性后台探测器（见 session_watch.go）
+	watcher *sessionWatcher
+
 	tm *transfer.Manager
 }
 
@@ -67,8 +69,13 @@ func New() *App {
 		loginPhase: PhaseIdle,
 	}
 	a.tm = transfer.NewManager(&sdkRunner{app: a}, a.emitTask)
+	// 任务持久化：与配置同目录，退出前会做最后一次同步落盘。
+	a.tm.EnablePersistence(transfer.DefaultStatePath(a.store.Dir()))
 	a.tm.Start(16)
 	a.tm.SetConcurrency(a.settings.Concurrency)
+	// 读回上次残留的任务，统一置为「已中断」等待用户手动续传。
+	// 必须在 Start 之后调用：恢复的任务会经 push 推给前端。
+	a.tm.RestoreTasks()
 	return a
 }
 
@@ -93,6 +100,7 @@ func (a *App) DomReady(ctx context.Context) {
 
 // Shutdown 退出前停掉调度并落盘配置。
 func (a *App) Shutdown(ctx context.Context) {
+	a.stopSessionWatch()
 	a.tm.CancelAll()
 	a.tm.Stop()
 	// 登录流程可能还挂在等待中，退出前确保端口被释放
@@ -142,6 +150,7 @@ func (a *App) connect(raw, source string) (AuthState, error) {
 	if source == "manual" || source == "interactive" {
 		_ = a.store.SaveCredentials(config.Credentials{Cookie: cookie, Source: source})
 	}
+	a.startSessionWatch()
 	a.emitAuth()
 	return a.AuthStatus(), nil
 }
@@ -336,18 +345,6 @@ func dirOf(p string) string {
 	return "/"
 }
 
-// baseOf 返回远端路径的最后一段。
-func baseOf(p string) string {
-	p = strings.Trim(strings.TrimSpace(p), "/")
-	if p == "" {
-		return "/"
-	}
-	if i := strings.LastIndex(p, "/"); i >= 0 {
-		return p[i+1:]
-	}
-	return p
-}
-
 // extOf 取小写扩展名（不含点），目录返回空。
 func extOf(name string) string {
 	i := strings.LastIndex(name, ".")
@@ -355,13 +352,4 @@ func extOf(name string) string {
 		return ""
 	}
 	return strings.ToLower(name[i+1:])
-}
-
-// cleanLocal 把用户输入的本地目录规整成绝对路径的父目录形式。
-func cleanLocal(dir string) string {
-	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return "."
-	}
-	return path.Clean(strings.ReplaceAll(dir, "\\", "/"))
 }
