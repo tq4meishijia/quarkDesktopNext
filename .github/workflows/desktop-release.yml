@@ -238,23 +238,50 @@ jobs:
           set -euo pipefail
           EXPECT="${{ needs.version.outputs.version }}"
           echo "期望版本号: $EXPECT"
+
+          # 定位可执行文件。
+          # macOS 上 wails 产出 <name>.app 目录，可执行文件在其 Contents/MacOS/ 内。
+          # 注意：不能用 ".../Contents/MacOS/*" 这样的通配符字符串直接给
+          # `[ -e ]` 判断 —— 变量里的 * 不会被展开，测试恒为假。
+          # 必须先用数组展开 glob。
           if [ "${{ matrix.goos }}" = "darwin" ]; then
-            BIN="$(find build/bin -maxdepth 1 -name '*.app' -print -quit)/Contents/MacOS/*"
+            APP="$(find build/bin -maxdepth 1 -name '*.app' -print -quit)"
+            if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+              echo "::error::未找到 .app 包：$APP"; exit 1
+            fi
+            # shopt -s nullglob：glob 无匹配时数组为空，而不是留下字面量 "*"
+            shopt -s nullglob
+            BINS=("$APP"/Contents/MacOS/*)
+            shopt -u nullglob
+            if [ "${#BINS[@]}" -eq 0 ]; then
+              echo "::error::.app 包内未找到可执行文件：$APP/Contents/MacOS/"; exit 1
+            fi
           else
-            BIN="$(find build/bin -maxdepth 1 -type f ! -name '*.dSYM' -print -quit)"
+            BINS=()
+            while IFS= read -r f; do
+              BINS+=("$f")
+            done < <(find build/bin -maxdepth 1 -type f ! -name '*.dSYM')
+            if [ "${#BINS[@]}" -eq 0 ]; then
+              echo "::error::build/bin 下未找到可执行文件"; exit 1
+            fi
           fi
-          if [ -z "$BIN" ] || [ ! -e "$BIN" ]; then
-            echo "::error::未找到构建产物，无法校验版本号"; exit 1
-          fi
-          # 用 grep -a -c 计数而非 strings：runner 镜像不一定带 binutils；
-          # -a 把二进制当文本，-c 给出匹配行数，0 表示「产物里没有该版本号」。
-          # 实测：注入版命中 3 行，未注入版 0 行，可区分。
-          HITS="$(grep -a -c "$EXPECT" "$BIN" || true)"
-          if [ "${HITS:-0}" -gt 0 ]; then
-            echo "✅ 版本号已注入: $EXPECT（命中 $HITS 处）"
+
+          # 逐个检查：任一产物含版本号即通过。
+          # 用 grep -a -c 计数而非 strings（runner 镜像不带 binutils）；
+          # -a 把二进制当文本，-c 给出匹配行数，0 表示没有该版本号。
+          FOUND=0
+          for BIN in "${BINS[@]}"; do
+            HITS="$(grep -a -c "$EXPECT" "$BIN" 2>/dev/null || true)"
+            echo "  $(basename "$BIN"): 命中 ${HITS:-0} 处（$(wc -c < "$BIN") bytes）"
+            if [ "${HITS:-0}" -gt 0 ]; then
+              FOUND=$((FOUND + 1))
+            fi
+          done
+
+          if [ "$FOUND" -gt 0 ]; then
+            echo "✅ 版本号已注入: $EXPECT（$FOUND/${#BINS[@]} 个产物命中）"
           else
-            echo "::error::产物中未找到版本号 $EXPECT —— ldflags -X 可能写错了符号路径"
-            echo "  可执行文件: $BIN ($(wc -c < "$BIN") bytes)"
+            echo "::error::所有产物中均未找到版本号 $EXPECT —— ldflags -X 可能写错了符号路径"
             exit 1
           fi
 
