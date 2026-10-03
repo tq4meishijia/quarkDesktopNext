@@ -25,10 +25,49 @@ type fakeRunner struct {
 	release  chan struct{}
 	err      error
 	// block 若非 nil，每个任务在搬运前先等它关闭。
-	block chan struct{}
+	//
+	// 用 atomic.Pointer 而非裸 chan：worker goroutine 会在 do() 里读它，
+	// 而测试主协程在「close 后置 nil」，两者并发 —— 裸字段是数据竞争
+	// （-race 实测报出 TestPauseBeforeStartIsNotRun 的 DATA RACE）。
+	// blockMu 进一步保证「close(ch) + 置 nil」对外是一个原子步骤。
+	block   atomic.Pointer[chan struct{}]
+	blockMu sync.Mutex
 	// gateAware 为 true 时，block 等待期间轮询任务的暂停闸门，
 	// 暂停时返回 ErrPaused（与内建下载器行为一致）。
 	gateAware bool
+}
+
+// setBlock 设置/清除阻塞通道。
+func (f *fakeRunner) setBlock(ch chan struct{}) {
+	f.blockMu.Lock()
+	f.block.Store(&ch)
+	f.blockMu.Unlock()
+}
+
+// getBlock 读取当前阻塞通道（可能为 nil）。
+func (f *fakeRunner) getBlock() chan struct{} {
+	p := f.block.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// unblock 关闭阻塞通道并置 nil，供「放行并复位」用。
+// 锁内完成 close+置 nil，保证其他 goroutine 不会观察到「已置 nil 但未 close」
+// 或「已 close 但未置 nil」的中间态。
+func (f *fakeRunner) unblock() {
+	f.blockMu.Lock()
+	if p := f.block.Load(); p != nil {
+		select {
+		case <-*p: // 已关闭
+		default:
+			close(*p)
+		}
+		var nilCh chan struct{}
+		f.block.Store(&nilCh)
+	}
+	f.blockMu.Unlock()
 }
 
 func newFakeRunner() *fakeRunner {
@@ -52,9 +91,13 @@ func (f *fakeRunner) leave() { f.inflight.Add(-1) }
 func (f *fakeRunner) do(ctx context.Context, t *Task, prog ProgressFunc) error {
 	f.enter()
 	defer f.leave()
-	if f.block != nil {
+	// 注意：这里不在锁内做「判空 → 等待」两步。unblock() 会把 block 置 nil，
+	// 若判空与进入 select 之间被 unblock 抢先，`<-nil` 会永久阻塞
+	//（nil channel 永不不就绪）。因此把「取通道并等待」放进同一个锁窗口，
+	// 或让 waitUnblocked 对 nil 视作「无需等待」——这里选后者，简单且无死锁。
+	if blk := f.getBlock(); blk != nil {
 		// 与真实 Runner 一致：暂停时返回 ErrPaused，取消时返回 ctx.Err()。
-		if err := f.waitUnblocked(ctx, t); err != nil {
+		if err := f.waitUnblocked(ctx, t, blk); err != nil {
 			return err
 		}
 	}
@@ -67,7 +110,11 @@ func (f *fakeRunner) do(ctx context.Context, t *Task, prog ProgressFunc) error {
 
 // waitUnblocked 等待 block 关闭；gateAware 时同时响应暂停与取消，
 // 并返回与真实 Runner 同义的错误（ErrPaused / ctx.Err()）。
-func (f *fakeRunner) waitUnblocked(ctx context.Context, t *Task) error {
+func (f *fakeRunner) waitUnblocked(ctx context.Context, t *Task, blk chan struct{}) error {
+	// blk 为 nil 表示「期间已被 unblock 复位」，无需等待。
+	if blk == nil {
+		return ctx.Err()
+	}
 	ticker := time.NewTicker(2 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -79,7 +126,7 @@ func (f *fakeRunner) waitUnblocked(ctx context.Context, t *Task) error {
 			return ErrPaused
 		}
 		select {
-		case <-f.block:
+		case <-blk:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -206,7 +253,7 @@ func TestSetConcurrencyRaiseTakesEffect(t *testing.T) {
 	m.SetConcurrency(1)
 
 	// 塞入 4 个任务并让第一个占住唯一槽位。
-	r.block = make(chan struct{})
+	r.setBlock(make(chan struct{}))
 	m.Enqueue(Spec{Kind: "download", Name: "a", Size: 1})
 	if !waitFor(t, 3*time.Second, func() bool { return r.inflight.Load() == 1 }) {
 		t.Fatal("首个任务未占用槽位")
@@ -233,7 +280,7 @@ func TestSetConcurrencyRaiseTakesEffect(t *testing.T) {
 	if !waitFor(t, 5*time.Second, func() bool { return r.started.Load() >= 2 }) {
 		t.Fatalf("调大并发后新任务未获得槽位：started=%d", r.started.Load())
 	}
-	close(r.block)
+	r.unblock()
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +299,7 @@ func TestPauseYieldsSlot(t *testing.T) {
 	m.SetConcurrency(2)
 
 	// 让两个任务真正占住全部 2 个槽位。
-	r.block = make(chan struct{})
+	r.setBlock(make(chan struct{}))
 	m.Enqueue(Spec{Kind: "download", Name: "a", Size: 1})
 	m.Enqueue(Spec{Kind: "download", Name: "b", Size: 1})
 	if !waitFor(t, 3*time.Second, func() bool { return r.inflight.Load() == 2 }) {
@@ -273,7 +320,7 @@ func TestPauseYieldsSlot(t *testing.T) {
 	if !waitFor(t, 3*time.Second, func() bool { return r.started.Load() >= 3 }) {
 		t.Fatal("暂停全部任务后新任务无法启动（并发额度被暂停任务占死）")
 	}
-	close(r.block)
+	r.unblock()
 }
 
 // TestPausedTaskStaysPausedAndResumable 验证暂停的任务保持 paused 态、
@@ -281,7 +328,7 @@ func TestPauseYieldsSlot(t *testing.T) {
 func TestPausedTaskStaysPausedAndResumable(t *testing.T) {
 	r := newFakeRunner()
 	r.gateAware = true
-	r.block = make(chan struct{})
+	r.setBlock(make(chan struct{}))
 	m := newTestManager(t, r, 2)
 	m.SetConcurrency(1)
 
@@ -308,8 +355,7 @@ func TestPausedTaskStaysPausedAndResumable(t *testing.T) {
 	}
 
 	// 放行并恢复：任务应重新被调度并最终完成。
-	close(r.block)
-	r.block = nil
+	r.unblock()
 	if err := m.Resume(task.ID); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
@@ -323,7 +369,7 @@ func TestPausedTaskStaysPausedAndResumable(t *testing.T) {
 func TestPauseBeforeStartIsNotRun(t *testing.T) {
 	r := newFakeRunner()
 	r.gateAware = true
-	r.block = make(chan struct{})
+	r.setBlock(make(chan struct{}))
 	m := newTestManager(t, r, 1)
 	m.SetConcurrency(1)
 
@@ -337,8 +383,7 @@ func TestPauseBeforeStartIsNotRun(t *testing.T) {
 		t.Fatalf("Pause: %v", err)
 	}
 	// 第一个跑完后，第二个不应被启动（它处于暂停）。
-	close(r.block)
-	r.block = nil
+	r.unblock()
 	if !waitFor(t, 3*time.Second, func() bool { return first.Status().IsTerminal() }) {
 		t.Fatalf("首个任务未结束：%s", first.Status())
 	}
@@ -360,7 +405,7 @@ func TestPauseBeforeStartIsNotRun(t *testing.T) {
 func TestCancelPausedTask(t *testing.T) {
 	r := newFakeRunner()
 	r.gateAware = true
-	r.block = make(chan struct{})
+	r.setBlock(make(chan struct{}))
 	m := newTestManager(t, r, 1)
 	m.SetConcurrency(1)
 
@@ -380,7 +425,7 @@ func TestCancelPausedTask(t *testing.T) {
 	if !waitFor(t, 3*time.Second, func() bool { return task.Status() == StatusCancelled }) {
 		t.Fatalf("取消后状态为 %s，期望 %s", task.Status(), StatusCancelled)
 	}
-	close(r.block)
+	r.unblock()
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +503,7 @@ func TestRetryAfterPauseResetsGate(t *testing.T) {
 // TestConcurrencyRespected 验证并发峰值不超过设定上限。
 func TestConcurrencyRespected(t *testing.T) {
 	r := newFakeRunner()
-	r.block = make(chan struct{})
+	r.setBlock(make(chan struct{}))
 	m := newTestManager(t, r, 8)
 	m.SetConcurrency(3)
 
@@ -469,7 +514,7 @@ func TestConcurrencyRespected(t *testing.T) {
 	if got := r.peak.Load(); got > 3 {
 		t.Fatalf("并发峰值 %d 超过上限 3", got)
 	}
-	close(r.block)
+	r.unblock()
 }
 
 // TestGateWaitUnblocksImmediately 验证解除暂停能立即唤醒 Wait（不再等 100ms 轮询）。
