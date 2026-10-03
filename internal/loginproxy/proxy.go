@@ -514,9 +514,10 @@ func allowedHost(host string) bool {
 	if host == "" || strings.ContainsAny(host, "@: ") {
 		return false
 	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	// 注意：此处刻意不做 net.SplitHostPort 剥离端口。
+	// 上面的 ContainsAny 已拒绝任何含 ":" 的 host，而 SplitHostPort 成功的
+	// 前提正是含 ":"，故该分支在当前调用路径上不可达（历史遗留）。
+	// 保留拒绝含 ":" 的行为即可覆盖带端口的输入（proxy_test.go 已断言）。
 	for _, suffix := range allowedSuffix {
 		if strings.HasSuffix(host, suffix) && len(host) > len(suffix) {
 			return true

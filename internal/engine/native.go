@@ -180,7 +180,6 @@ func (n *Native) split(ctx context.Context, client *http.Client, part string, r 
 	done := make([]bool, segments)
 	copy(done, st.Done)
 	rep := newReporter(r)
-	var written int64
 
 	for i := 0; i < segments; i++ {
 		if st.Done[i] {
@@ -195,9 +194,8 @@ func (n *Native) split(ctx context.Context, client *http.Client, part string, r 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			n, err := n.pull(ctx, client, out, r, start, end)
+			_, err := n.pull(ctx, client, out, r, start, end)
 			mu.Lock()
-			written += n
 			if err != nil && firstEr == nil {
 				firstEr = err
 			}

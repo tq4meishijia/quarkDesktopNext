@@ -30,7 +30,12 @@ export function createStore(initial = {}) {
       }
       return state;
     },
-    /** 订阅变更，返回取消订阅函数。 */
+    /**
+     * 订阅变更，返回取消订阅函数。
+     *
+     * 当前无调用方（页面各自用 onEvent 订阅后端事件）。保留是因为 set() 的
+     * 广播循环依赖它，删掉会让容器失去「变更通知」这一基本能力。
+     */
     subscribe(fn) {
       subs.add(fn);
       return () => subs.delete(fn);
