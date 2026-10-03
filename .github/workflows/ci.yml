@@ -222,16 +222,23 @@ jobs:
     needs: [desktop, quark-cil, race, frontend, desktop-build]
     if: always()
     steps:
+      # 注意：GitHub Actions 表达式不支持 needs.<动态变量>.result 这类动态索引
+      # （会在解析期报 "Unexpected symbol"），因此这里逐项显式判断。
       - name: Check matrix results
         run: |
           status=0
-          for r in desktop quark-cil race frontend desktop-build; do
-            if [ "${{ needs.$r.result }}" != "success" ]; then
-              echo "$r=${{ needs.$r.result }}"
-              status=1
-            fi
-          done
+          echo "desktop=${{ needs.desktop.result }}"
+          echo "quark-cil=${{ needs.quark-cil.result }}"
+          echo "race=${{ needs.race.result }}"
+          echo "frontend=${{ needs.frontend.result }}"
+          echo "desktop-build=${{ needs.desktop-build.result }}"
+          [ "${{ needs.desktop.result }}" = "success" ] || status=1
+          [ "${{ needs.quark-cil.result }}" = "success" ] || status=1
+          [ "${{ needs.race.result }}" = "success" ] || status=1
+          [ "${{ needs.frontend.result }}" = "success" ] || status=1
+          [ "${{ needs.desktop-build.result }}" = "success" ] || status=1
           if [ "$status" -ne 0 ]; then
+            echo "存在失败或跳过的检查"
             exit 1
           fi
           echo "全部构建与检查通过"
