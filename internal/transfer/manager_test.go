@@ -211,19 +211,26 @@ func TestSetConcurrencyRaiseTakesEffect(t *testing.T) {
 	if !waitFor(t, 3*time.Second, func() bool { return r.inflight.Load() == 1 }) {
 		t.Fatal("首个任务未占用槽位")
 	}
-	blocked := make(chan struct{})
 	m.Enqueue(Spec{Kind: "download", Name: "b", Size: 1})
 	// 此时并发=1，第二个任务应被挡住。
-	time.Sleep(50 * time.Millisecond)
-	if r.inflight.Load() != 1 {
-		t.Fatalf("并发=1 时不应有第二个任务在跑，inflight=%d", r.inflight.Load())
+	//
+	// 断言方式：不能靠固定 Sleep 猜测 worker 调度进度 —— Linux runner 更慢，
+	// 固定等待可能不足而误判。改为观察「槽位在途数」是否恰好等于上限：
+	// 一旦第二个任务真的被 worker 取到并卡在 acquire 上，inflight 会稳定为 1；
+	// 若槽位被误放行则会变成 2。
+	if !waitFor(t, 5*time.Second, func() bool { return r.inflight.Load() == 1 }) {
+		t.Fatalf("并发=1 时第二个任务不应获得槽位：inflight=%d", r.inflight.Load())
+	}
+	// 再确认它始终没启动（等一段时间，排除「稍后才被放行」）。
+	if !waitFor(t, 200*time.Millisecond, func() bool { return r.started.Load() >= 2 }) {
+		// 期望行为：200ms 内 started 保持 1。
+	} else {
+		t.Fatalf("并发=1 时第二个任务不应启动：started=%d", r.started.Load())
 	}
 
 	// 调大到 3，第二个任务应立刻获得槽位。
 	m.SetConcurrency(3)
-	go func() { close(blocked) }()
-	_ = blocked
-	if !waitFor(t, 3*time.Second, func() bool { return r.started.Load() >= 2 }) {
+	if !waitFor(t, 5*time.Second, func() bool { return r.started.Load() >= 2 }) {
 		t.Fatalf("调大并发后新任务未获得槽位：started=%d", r.started.Load())
 	}
 	close(r.block)

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -306,9 +307,15 @@ func TestCheckSensitiveLocalPathBlocks(t *testing.T) {
 		}
 	}
 	// Windows 系统路径。
-	for _, p := range []string{`c:/windows/system32/config/sam`, `c:/pagefile.sys`, `c:/bootmgr`} {
-		if err := checkSensitiveLocalPath(p); err == nil {
-			t.Errorf("Windows 系统路径 %q 应被拦截", p)
+	//
+	// 仅在 Windows 上断言：这些是盘符开头的 Windows 特有形态，在 POSIX 上
+	// filepath.Abs 会把它们当作相对路径（拼到 CWD 下），校验语义不同 ——
+	// 跨平台硬跑会在 Linux CI 上误报失败。
+	if runtime.GOOS == "windows" {
+		for _, p := range []string{`c:/windows/system32/config/sam`, `c:/pagefile.sys`, `c:/bootmgr`} {
+			if err := checkSensitiveLocalPath(p); err == nil {
+				t.Errorf("Windows 系统路径 %q 应被拦截", p)
+			}
 		}
 	}
 	// 空路径。
