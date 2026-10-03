@@ -26,6 +26,7 @@ export namespace app {
 	    masked: string;
 	    message: string;
 	    profile: Profile;
+	    reason: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AuthState(source);
@@ -38,6 +39,7 @@ export namespace app {
 	        this.masked = source["masked"];
 	        this.message = source["message"];
 	        this.profile = this.convertValues(source["profile"], Profile);
+	        this.reason = source["reason"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -57,6 +59,26 @@ export namespace app {
 		    }
 		    return a;
 		}
+	}
+	export class CredentialInfo {
+	    hasCredential: boolean;
+	    source: string;
+	    itemCount: number;
+	    sessionFile: string;
+	    loggedIn: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CredentialInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hasCredential = source["hasCredential"];
+	        this.source = source["source"];
+	        this.itemCount = source["itemCount"];
+	        this.sessionFile = source["sessionFile"];
+	        this.loggedIn = source["loggedIn"];
+	    }
 	}
 	export class FileItem {
 	    fid: string;
@@ -168,6 +190,7 @@ export namespace app {
 	    url: string;
 	    collected: number;
 	    remaining: number;
+	    staleExisting: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new InteractiveLoginState(source);
@@ -181,6 +204,7 @@ export namespace app {
 	        this.url = source["url"];
 	        this.collected = source["collected"];
 	        this.remaining = source["remaining"];
+	        this.staleExisting = source["staleExisting"];
 	    }
 	}
 	export class MyShareItem {

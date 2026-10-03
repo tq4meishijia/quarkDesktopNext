@@ -22,6 +22,10 @@ export function ClearCompletedTasks() {
   return window['go']['app']['App']['ClearCompletedTasks']();
 }
 
+export function ClearCredentials() {
+  return window['go']['app']['App']['ClearCredentials']();
+}
+
 export function ConfigDir() {
   return window['go']['app']['App']['ConfigDir']();
 }
@@ -36,6 +40,10 @@ export function CreateFolder(arg1, arg2) {
 
 export function CreateShareLink(arg1, arg2, arg3) {
   return window['go']['app']['App']['CreateShareLink'](arg1, arg2, arg3);
+}
+
+export function CredentialState() {
+  return window['go']['app']['App']['CredentialState']();
 }
 
 export function Delete(arg1) {
@@ -64,6 +72,10 @@ export function GetProfile() {
 
 export function GetSettings() {
   return window['go']['app']['App']['GetSettings']();
+}
+
+export function HandleSessionInvalid(arg1) {
+  return window['go']['app']['App']['HandleSessionInvalid'](arg1);
 }
 
 export function InteractiveLoginStatus() {

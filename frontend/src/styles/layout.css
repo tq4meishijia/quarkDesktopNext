@@ -1057,6 +1057,17 @@
   font-size: var(--fs-xs);
 }
 
+/* 强制重新登录时的提示：浏览器里旧登录态还在，必须告诉用户下一步做什么 */
+.login__interactive-warn {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
 /* ---------- 响应式：窗口变窄时的适配 ---------- */
 
 /* 中等宽度：侧边栏收窄为图标栏 */

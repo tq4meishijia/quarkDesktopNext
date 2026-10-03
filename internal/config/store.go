@@ -149,6 +149,13 @@ func sanitize(v Settings) Settings {
 // Dir 暴露配置目录，供设置页展示。
 func (s *Store) Dir() string { return s.dir }
 
+// SessionFilePath 返回会话凭证文件的完整路径。
+// 设置页要把它展示给用户——「凭证存在哪、删掉的是哪个文件」必须可见，
+// 否则用户只能猜，也没法自己手动清理。
+func (s *Store) SessionFilePath() string {
+	return filepath.Join(s.dir, sessionFile)
+}
+
 // Settings 返回当前配置快照。
 func (s *Store) Settings() Settings {
 	s.mu.Lock()

@@ -34,6 +34,9 @@ type InteractiveLoginState struct {
 	Collected int `json:"collected"`
 	// Remaining 距离超时的剩余秒数，前端据此显示倒计时。
 	Remaining int `json:"remaining"`
+	// StaleExisting 为 true 表示强制重新登录模式下检测到浏览器里已有可用凭证，
+	// 代理不会自动收敛；前端必须给出明确指引，不能让用户干等。
+	StaleExisting bool `json:"staleExisting"`
 }
 
 // AuthState 登录态快照，登录页与侧边栏都消费它。
@@ -43,6 +46,9 @@ type AuthState struct {
 	Masked   string  `json:"masked"` // 脱敏后的凭证，仅用于回显
 	Message  string  `json:"message"`
 	Profile  Profile `json:"profile"`
+	// Reason 是本次状态变化的来源：logout / expired / authFailed / credCleared。
+	// 前端据此决定提示文案，并在非 logout 的场景下同样清掉本地存储。
+	Reason string `json:"reason"`
 }
 
 // Profile 用户信息与容量。

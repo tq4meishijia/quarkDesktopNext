@@ -84,7 +84,7 @@ func isCredential(name string) bool {
 	return false
 }
 
-// absorb 合并一段请求头里的 Cookie，返回是否首次探测到登录凭证。
+// absorb 合并一段请求头里的 Cookie，返回是否首次探测到「本次登录」的凭证。
 func (s *Session) absorb(raw string) bool {
 	got := parseCookieHeader(raw)
 	if len(got) == 0 {
@@ -95,6 +95,67 @@ func (s *Session) absorb(raw string) bool {
 		s.jar[k] = v
 	}
 	already := s.ready
+	fresh := s.detectFreshLocked(got)
 	s.mu.Unlock()
-	return !already && hasCredential(got)
+	return !already && fresh
+}
+
+// detectFreshLocked 在持锁状态下判断刚收到的一批 Cookie 是否代表「一次新的登录」。
+//
+// 强制重新登录模式（requireNew）下，浏览器里原有的 __pus/__puus 会在代理启动后
+// 的第一个请求里就出现，与用户是否真的登录无关。非强制模式保持原语义：见到凭证
+// 即视为登录成功。
+//
+// 强制模式下的判定规则：
+//   - 首次见到某个凭证名：只记基线，不算登录完成。浏览器在用户登录之前不会有凭证，
+//     所以第一次看到的东西恰恰可能是「旧的」。
+//     例外：如果这批 Cookie 是随 Set-Cookie 首次下发（浏览器原本没有），
+//     那就是本次登录产生的，由 absorbOne 用 Set-Cookie 语义单独判定。
+//   - 同一凭证名但值变了：说明登录态被刷新，即刚刚发生了新登录，算成功。
+//   - 与基线完全一致：只是浏览器里早就有的旧凭证，不算。
+func (s *Session) detectFreshLocked(got map[string]string) bool {
+	if !s.requireNew {
+		return hasCredential(got)
+	}
+	fresh := false
+	hasCred := false
+	for name, value := range got {
+		if !isCredential(name) {
+			continue
+		}
+		hasCred = true
+		old, seen := s.baseline[name]
+		switch {
+		case !seen:
+			// 第一次见到这个名字，先记基线。
+			s.baseline[name] = value
+		case old != value:
+			// 值变了：登录态被刷新，确实刚发生过新登录。
+			s.baseline[name] = value
+			fresh = true
+		}
+	}
+	if hasCred && !fresh {
+		// 只有旧凭证、没有任何变化：记下来供前端提示，避免用户干等。
+		s.staleExisting = true
+	}
+	return fresh
+}
+
+// detectFreshFromSetCookieLocked 判定上游下发的这个凭证是否代表一次新登录。
+//
+// 与请求头路径的区别：Set-Cookie 是上游「刚刚」写下的，若浏览器此前并无该凭证
+// （基线里没有这个名字），那它就是本次登录动作产生的，直接算成功。
+// 值与基线完全相同的重复下发（服务端刷新会话时常见）则不算。
+func (s *Session) detectFreshFromSetCookieLocked(name, value string) bool {
+	if !s.requireNew {
+		return isCredential(name)
+	}
+	old, seen := s.baseline[name]
+	s.baseline[name] = value
+	if !seen {
+		s.staleExisting = false
+		return isCredential(name)
+	}
+	return old != value && isCredential(name)
 }

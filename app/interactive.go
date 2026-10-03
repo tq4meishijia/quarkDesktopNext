@@ -36,7 +36,10 @@ func (a *App) StartInteractiveLogin() (InteractiveLoginState, error) {
 		a.loginSession.Close()
 		a.loginSession = nil
 	}
-	session, err := loginproxy.Start(interactiveTimeout)
+	requireNew := a.requireFreshLogin
+	session, err := loginproxy.StartWith(interactiveTimeout, loginproxy.Options{
+		RequireFreshLogin: requireNew,
+	})
 	if err != nil {
 		a.mu.Unlock()
 		return InteractiveLoginState{}, err
@@ -44,6 +47,9 @@ func (a *App) StartInteractiveLogin() (InteractiveLoginState, error) {
 	a.loginSession = session
 	a.loginPhase = PhaseWaiting
 	a.loginHint = "已打开浏览器，请在弹出的夸克网盘页面完成登录。"
+	if requireNew {
+		a.loginHint = "已打开浏览器。此前清除过凭证，请在页面里重新登录一次（若浏览器已是登录态，需先退出夸克）。"
+	}
 	ctx := a.ctx
 	a.mu.Unlock()
 
@@ -101,6 +107,9 @@ func (a *App) awaitInteractiveLogin(session *loginproxy.Session) {
 	if a.loginSession == session {
 		a.loginSession = nil
 	}
+	// 本轮无论成败，强制重登标记都用完了：它只针对「清完凭证后的第一次」，
+	// 否则用户重新登录成功后，下次再点交互式登录又被要求重登一遍。
+	a.requireFreshLogin = false
 	a.mu.Unlock()
 
 	if err != nil {
@@ -139,6 +148,14 @@ func (a *App) interactiveState() InteractiveLoginState {
 		_, collected := a.loginSession.Snapshot()
 		st.Collected = collected
 		st.Remaining = a.loginSession.Remaining()
+		// 强制重新登录模式下检测到浏览器已有登录态：用户干等也不会收敛，
+		// 必须明确告诉他下一步做什么。
+		if a.loginSession.StaleExistingCredential() {
+			st.StaleExisting = true
+			if a.loginPhase == PhaseWaiting {
+				st.Hint = "检测到浏览器里已有夸克登录态，不会自动进入。请在该页面退出夸克账号后重新登录，或手动退出浏览器 Cookie 后重试。"
+			}
+		}
 	}
 	return st
 }

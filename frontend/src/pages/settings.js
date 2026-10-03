@@ -10,6 +10,7 @@ import { bridge, bridgeMode } from '../bridge/index.js';
 import { notify, toastError } from '../components/toast.js';
 import { confirmDialog } from '../components/modal.js';
 import { loadingState } from '../components/empty.js';
+import { clearSession } from '../core/session.js';
 
 export const meta = { title: '设置' };
 
@@ -52,7 +53,7 @@ const KIND_TEXT = {
 
 export function settingsPage(ctx) {
   const api = () => bridge();
-  const state = { settings: null, dir: '', loading: true, downloaders: [] };
+  const state = { settings: null, dir: '', loading: true, downloaders: [], credential: null, clearing: false };
 
   const page = h('div', { class: 'page' });
 
@@ -60,14 +61,17 @@ export function settingsPage(ctx) {
     state.loading = true;
     render();
     try {
-      const [s, d, list] = await Promise.all([
+      const [s, d, list, cred] = await Promise.all([
         api().settings.get(),
         api().settings.dir(),
         api().settings.downloaders(),
+        // 凭证状态读不到不该拖垮整个设置页，降级为 null 即可
+        api().auth.credentialState().catch(() => null),
       ]);
       state.settings = { ...DEFAULTS, ...(s || {}) };
       state.dir = d || '';
       state.downloaders = list || [];
+      state.credential = cred;
     } catch (err) {
       state.settings = { ...DEFAULTS };
       toastError(err, '设置加载失败');
@@ -387,6 +391,91 @@ export function settingsPage(ctx) {
     return row('上传时的同名文件策略', '决定目标位置已存在同名文件时的处理方式。', select);
   }
 
+  // ---------- 凭证 ----------
+
+  const SOURCE_TEXT = {
+    interactive: '浏览器登录（本机代理采集）',
+    manual: '手动粘贴 Cookie',
+    env: '环境变量',
+    unknown: '未知来源',
+  };
+
+  async function doClearCredentials() {
+    const cred = state.credential || {};
+    const where = cred.sessionFile || '本机配置文件';
+    const ok = await confirmDialog({
+      title: '清除本机凭证',
+      message: `将删除 ${where} 并断开当前登录态，之后需要重新登录才能继续使用。下载路径等其它设置不受影响。`,
+      confirmText: '清除凭证',
+      danger: true,
+    });
+    if (!ok) return;
+    state.clearing = true;
+    render();
+    try {
+      // 后端直接返回清除后的状态，省掉一次往返查询
+      state.credential = await api().auth.clearCredentials();
+      // 清掉本机痕迹：后端只能删 session.json（它在 Go 侧，拿不到 WebView 存储），
+      // localStorage / Cookie 必须由前端自己清。
+      clearSession();
+      notify.success('已清除本机保存的登录凭证');
+    } catch (err) {
+      toastError(err, '清除凭证失败');
+    } finally {
+      state.clearing = false;
+      render();
+    }
+  }
+
+  function credentialRows() {
+    const cred = state.credential;
+    if (!cred) return null;
+
+    const has = !!cred.hasCredential;
+    const sourceText = SOURCE_TEXT[cred.source] || cred.source || '未知来源';
+
+    const statusLine = has
+      ? `已保存 ${cred.itemCount || 0} 项 Cookie（来源：${sourceText}）`
+      : '本机没有保存登录凭证（使用环境变量登录或尚未登录都属于这种情况）';
+
+    const desc = has
+      ? `凭证明文存放在 ${cred.sessionFile}。清除会删除该文件并立即退出登录；只想退出而不删文件请用侧边栏底部的退出按钮。`
+      : '若之前登录过、这里却显示没有凭证，说明会话文件已被手动删除或清理过。';
+
+    return h(
+      'div',
+      { class: 'card' },
+      h('div', { class: 'card__title', text: '凭证与安全' }),
+      h(
+        'div',
+        { class: 'col', style: { gap: 'var(--sp-2)', marginTop: 'var(--sp-3)' } },
+        h(
+          'div',
+          { class: 'row', style: { gap: 'var(--sp-2)' } },
+          h('span', {
+            class: 'dot dot--' + (has ? 'warn' : 'ok'),
+            title: has ? '存在已保存凭证' : '无已保存凭证',
+          }),
+          h('span', { class: 'text-3', text: statusLine })
+        ),
+        h('div', { class: 'field__hint', text: desc }),
+        h(
+          'button',
+          {
+            class: 'btn btn--danger',
+            type: 'button',
+            style: { alignSelf: 'flex-start', marginTop: 'var(--sp-2)' },
+            // 没有凭证时不必提供「清除」，避免用户以为点了会发生什么
+            disabled: !has || state.clearing,
+            onClick: doClearCredentials,
+          },
+          icon('logout', 15),
+          h('span', { text: state.clearing ? '正在清除…' : '清除本机凭证' })
+        )
+      )
+    );
+  }
+
   function aboutRows() {
     const mode = bridgeMode();
     return h(
@@ -474,6 +563,7 @@ export function settingsPage(ctx) {
           h('div', { class: 'card__title', text: '外观' }),
           h('div', { style: { marginTop: 'var(--sp-2)' } }, themeRow())
         ),
+        credentialRows(),
         aboutRows()
       )
     );

@@ -159,8 +159,13 @@ export function createMockBridge() {
   let settings = loadSettings();
   let auth = { loggedIn: false, source: '', masked: '', message: '未登录', profile: null };
   let seq = 200;
+
+  // 预览模式下的凭证落盘状态：登录后认为凭证已写入，清除后清空。
+  // 真实路径在 wails 模式下由 config.Store 给出，这里给一个同构的假路径。
+  let storedCredential = { hasCredential: false, source: 'unknown', itemCount: 0, sessionFile: 'C:\\Users\\<你>\\AppData\\Roaming\\kuake-desktop\\session.json' };
+  const credentialState = () => ({ ...storedCredential, loggedIn: !!(auth && auth.loggedIn) });
   // 交互式登录的模拟状态与定时器
-  let interactive = { active: false, phase: 'idle', hint: '', url: '', collected: 0, remaining: 0 };
+  let interactive = { active: false, phase: 'idle', hint: '', url: '', collected: 0, remaining: 0, staleExisting: false };
   let interactiveTimer = null;
   let interactiveTimer2 = null;
 
@@ -245,6 +250,13 @@ export function createMockBridge() {
           },
         };
         emit('auth:changed', auth);
+        // 登录成功即认为凭证已落盘，条目数按分号粗略统计
+        storedCredential = {
+          hasCredential: true,
+          source: 'manual',
+          itemCount: c.split(';').filter((x) => x.includes('=')).length,
+          sessionFile: storedCredential.sessionFile,
+        };
         return auth;
       },
       loginEnv: async () => {
@@ -252,18 +264,34 @@ export function createMockBridge() {
       },
       logout: async () => {
         auth = { loggedIn: false, source: '', masked: '', message: '未登录', profile: null };
+        storedCredential = { ...storedCredential, hasCredential: false, source: 'unknown', itemCount: 0 };
         emit('auth:changed', auth);
         return true;
+      },
+      // 会话失效上报：预览模式下同样清空内存态，保持行为一致
+      sessionInvalid: async () => {
+        auth = { loggedIn: false, source: '', masked: '', message: '未登录', profile: null, reason: 'expired' };
+        storedCredential = { ...storedCredential, hasCredential: false, source: 'unknown', itemCount: 0 };
+        emit('auth:changed', auth);
+        return true;
+      },
+      // 清除凭证：预览模式没有真实文件，用内存状态模拟清除后的返回值
+      credentialState: async () => credentialState(),
+      clearCredentials: async () => {
+        auth = { loggedIn: false, source: '', masked: '', message: '未登录', profile: null };
+        storedCredential = { ...storedCredential, hasCredential: false, source: 'unknown', itemCount: 0 };
+        emit('auth:changed', auth);
+        return credentialState();
       },
       profile: async () => auth.profile || {},
       // 预览模式下没有真实网盘，用一段可预期的等待过程演示交互：
       // 启动 -> 等待中 -> 自动登录成功，以便完整走通界面流程。
       interactiveStart: async () => {
-        interactive = { active: true, phase: 'waiting', hint: '预览模式：正在模拟浏览器登录…', url: 'https://pan.quark.cn', collected: 0, remaining: 300 };
+        interactive = { active: true, phase: 'waiting', hint: '预览模式：正在模拟浏览器登录…', url: 'https://pan.quark.cn', collected: 0, remaining: 300, staleExisting: false };
         if (interactiveTimer) clearTimeout(interactiveTimer);
         interactiveTimer = setTimeout(() => {
           interactiveTimer = null;
-          interactive = { active: false, phase: 'capturing', hint: '已捕获凭证，正在校验…', url: '', collected: 6, remaining: 0 };
+          interactive = { active: false, phase: 'capturing', hint: '已捕获凭证，正在校验…', url: '', collected: 6, remaining: 0, staleExisting: false };
         }, 1200);
         if (interactiveTimer2) clearTimeout(interactiveTimer2);
         interactiveTimer2 = setTimeout(() => {

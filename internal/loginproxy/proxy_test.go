@@ -173,6 +173,9 @@ func (u *upstreamTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if err != nil {
 		return nil, err
 	}
+	// 保留原始 ContentLength：否则用不透明 io.Reader 重建请求会退化成 chunked，
+	// 与真实默认 transport 的行为不一致，会让「消除 chunked」这类断言失真。
+	r.ContentLength = req.ContentLength
 	for k, vs := range req.Header {
 		for _, v := range vs {
 			r.Header.Add(k, v)

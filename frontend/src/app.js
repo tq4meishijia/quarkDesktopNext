@@ -12,6 +12,7 @@ import { icon } from './core/icons.js';
 import { createStore } from './core/store.js';
 import { createRouter } from './core/router.js';
 import { applyTheme, watchSystemTheme } from './core/theme.js';
+import { clearSession } from './core/session.js';
 import { bridge, initBridge, onEvent, EVENTS, bridgeMode } from './bridge/index.js';
 import { sidebar } from './components/sidebar.js';
 import { toast, toastError, notify } from './components/toast.js';
@@ -69,6 +70,11 @@ export async function startApp(root) {
   // ---------- 全局事件 ----------
 
   onEvent(EVENTS.authChanged, (next) => {
+    // 任何导致未登录的变化都要清掉本地痕迹：主动退出、会话过期、鉴权失败、
+    // 清除本机凭证都走这条路径（后端 invalidateSession 统一收口）。
+    if (!next || !next.loggedIn) {
+      clearSession();
+    }
     store.set({ auth: next || { loggedIn: false } });
     render();
   });
@@ -107,6 +113,13 @@ export async function startApp(root) {
     applyTheme(theme) {
       store.set({ settings: { ...store.get().settings, theme } });
       applyTheme(theme);
+    },
+    /**
+     * sessionInvalid 由页面在发现会话失效时调用（令牌过期、接口鉴权失败、
+     * 登录态校验不通过）。内部会通知后端执行统一清理，并清掉本地存储。
+     */
+    sessionInvalid(reason) {
+      return reportSessionInvalid(reason || 'expired');
     },
     store,
   };
@@ -156,19 +169,55 @@ export async function startApp(root) {
   async function doLogout() {
     const ok = await confirmDialog({
       title: '退出登录',
-      message: '退出后需要重新粘贴 Cookie 才能继续使用。',
+      message: '退出后会清除本机保存的凭证与登录状态，需要重新登录才能继续使用。',
       confirmText: '退出',
       danger: true,
     });
     if (!ok) return;
     try {
       await api().auth.logout();
-      store.set({ auth: { loggedIn: false } });
+      // 后端已删 session.json 并广播 auth:changed（那里会调 clearSession），
+      // 这里再清一次是为了覆盖「事件未送达」的情况，保证不留痕迹。
+      resetSessionState();
       notify.info('已退出登录');
       render();
     } catch (err) {
       toastError(err, '退出失败');
     }
+  }
+
+  /**
+   * resetSessionState 清空内存态与本地存储，是「会话失效」的本地收口。
+   * 任何入口（退出 / 过期 / 鉴权失败）都调用它，保证行为一致。
+   */
+  function resetSessionState() {
+    clearSession();
+    // 内存态一并重置：用户信息、任务列表、当前路由都要归位，
+    // 否则残留的昵称/头像/容量会短暂出现在界面上。
+    store.set({
+      auth: { loggedIn: false, reason: 'logout' },
+      tasks: new Map(),
+      route: 'files',
+    });
+    if (currentView && typeof currentView.destroy === 'function') {
+      currentView.destroy();
+    }
+    currentView = null;
+  }
+
+  /**
+   * reportSessionInvalid 由页面在发现会话失效时调用（令牌过期、接口鉴权失败）。
+   * 会通知后端执行统一清理，并同步清掉本地存储。
+   */
+  async function reportSessionInvalid(reason) {
+    try {
+      await api().auth.sessionInvalid(reason);
+    } catch (err) {
+      // 后端不可达时仍要清本地，不能因为这一步失败就留下痕迹
+      console.warn('[app] 通知后端会话失效失败，仍执行本地清理', err);
+    }
+    resetSessionState();
+    render();
   }
 
   function buildSidebar() {

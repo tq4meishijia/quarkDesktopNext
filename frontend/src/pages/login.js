@@ -66,6 +66,14 @@ export function loginPage({ onSuccess }) {
       statusBox.appendChild(h('div', { class: 'login__interactive-meta', text: detail.join(' · ') }));
     }
 
+    // 清除凭证后的强制重登：浏览器里旧 Cookie 还在，代理不会自动收敛。
+    // 必须把「接下来该做什么」讲清楚，否则用户只会盯着转圈等倒计时。
+    if (waiting && st.staleExisting) {
+      statusBox.appendChild(
+        h('div', { class: 'login__interactive-warn' }, h('span', { text: '浏览器里仍保留着上一次的夸克登录态。' }), h('br'), h('span', { text: '请在打开的页面里先退出夸克账号，再重新登录；否则本客户端会一直等待。' }))
+      );
+    }
+
     if (st.url) {
       const urlBox = h('div', { class: 'login__interactive-url', text: st.url });
       statusBox.appendChild(urlBox);

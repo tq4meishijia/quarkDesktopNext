@@ -13,6 +13,8 @@ export function CancelTask(arg1:string):Promise<boolean>;
 
 export function ClearCompletedTasks():Promise<number>;
 
+export function ClearCredentials():Promise<app.CredentialInfo>;
+
 export function ConfigDir():Promise<string>;
 
 export function Copy(arg1:string,arg2:string):Promise<boolean>;
@@ -20,6 +22,8 @@ export function Copy(arg1:string,arg2:string):Promise<boolean>;
 export function CreateFolder(arg1:string,arg2:string):Promise<app.FileItem>;
 
 export function CreateShareLink(arg1:string,arg2:number,arg3:boolean):Promise<app.ShareLink>;
+
+export function CredentialState():Promise<app.CredentialInfo>;
 
 export function Delete(arg1:Array<string>):Promise<number>;
 
@@ -34,6 +38,8 @@ export function EnsureDownloadDir(arg1:string):Promise<string>;
 export function GetProfile():Promise<app.Profile>;
 
 export function GetSettings():Promise<config.Settings>;
+
+export function HandleSessionInvalid(arg1:string):Promise<boolean>;
 
 export function InteractiveLoginStatus():Promise<app.InteractiveLoginState>;
 

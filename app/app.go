@@ -51,6 +51,10 @@ type App struct {
 	loginPhase   string
 	loginHint    string
 
+	// requireFreshLogin 为 true 时，下一轮交互式登录只接受新凭证：
+	// 清除凭证后浏览器里那份旧 Cookie 仍在，不加这个标记会直接跳过登录。
+	requireFreshLogin bool
+
 	tm *transfer.Manager
 }
 
@@ -166,10 +170,18 @@ func (a *App) requireClient() (*sdk.QuarkClient, error) {
 // ---------- 事件推送 ----------
 
 func (a *App) emitAuth() {
+	a.emitAuthReason("")
+}
+
+// emitAuthReason 广播登录态变化；reason 非空时随事件下发，供前端识别
+// 「主动退出」与「会话失效」并做出不同的本地清理动作。
+func (a *App) emitAuthReason(reason string) {
 	if a.ctx == nil {
 		return
 	}
-	runtime.EventsEmit(a.ctx, EventAuthChanged, a.AuthStatus())
+	st := a.AuthStatus()
+	st.Reason = reason
+	runtime.EventsEmit(a.ctx, EventAuthChanged, st)
 }
 
 func (a *App) emitTask(t *transfer.Task) {

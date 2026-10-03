@@ -55,6 +55,11 @@ export async function createWailsBridge() {
       login: (cookie) => call('Login', cookie),
       loginEnv: () => call('LoginFromEnv'),
       logout: () => ok('Logout'),
+      // 清除本机保存的凭证：删 session.json 并断开内存会话，返回清除后的状态
+      credentialState: () => call('CredentialState'),
+      clearCredentials: () => call('ClearCredentials'),
+      // 会话失效上报：令牌过期 / 鉴权失败时由前端调用，执行与退出登录一致的清理
+      sessionInvalid: (reason) => ok('HandleSessionInvalid', reason || 'expired'),
       profile: () => call('GetProfile'),
       // 交互式登录：起本地代理并让用户照常登录，成功后自动完成登录
       interactiveStart: () => call('StartInteractiveLogin'),
