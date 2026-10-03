@@ -32,8 +32,8 @@ func NewQuarkClient(cookies ...string) *QuarkClient {
 	isDebugEnv := debugEnv == "1"
 
 	client := &QuarkClient{
-		baseURL:          DRIVE_DOMAIN,    // 使用 DRIVE_DOMAIN 常量
-		accessToken:      initialToken,    // 当前使用的 token
+		baseURL:          DRIVE_DOMAIN, // 使用 DRIVE_DOMAIN 常量
+		accessToken:      initialToken, // 当前使用的 token
 		accessTokens:     []string{initialToken},
 		currentTokenIdx:  0,
 		authCheckTimeout: 5 * time.Minute, // 默认5分钟内缓存认证检查结果
@@ -291,10 +291,7 @@ func (qc *QuarkClient) makeRequest(method, urlOrEndpoint string, body io.Reader,
 	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
 	req.Header.Set("Sec-Ch-Ua-Platform-Version", `"19.0.0"`)
 	req.Header.Set("Sec-Ch-Ua-Wow64", "?0")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", ClientUserAgent)
 	req.Header.Set("Origin", "https://pan.quark.cn")
 
 	// 只在有 body 时设置 Content-Type
@@ -460,6 +457,20 @@ func (qc *QuarkClient) newRequestWithHeaders(method, url string, body io.Reader,
 }
 
 // setDefaultAPIHeaders 设置默认的 API 请求头部
+// ClientUserAgent 是夸克官方桌面客户端的 User-Agent。
+//
+// 为什么必须用它而不是浏览器 UA：夸克对「浏览器 UA + 大文件」组合会返回
+// 错误码 23018（"超过文件下载大小限制"）。这是服务端按 UA 做的策略限制，
+// 免费账号下约 50MB 以上的视频都会命中，客户端里表现为"下载失败/请用客户端"。
+//
+// 改用官方客户端 UA（含 Channel/pckk_other_ch 标识）后服务端不再限制大小。
+// 该 UA 形态在多个开源实现中被验证有效。
+//
+// 版本号取自夸克 PC 客户端 2.5.56（Electron 18.3.5.12 / Chromium 100）。
+// 如未来服务端收紧，表现为重新出现 23018，届时需更新此串。
+const ClientUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+	"quark-cloud-drive/2.5.56 Chrome/100.0.4896.160 Electron/18.3.5.12 Safari/537.36 Channel/pckk_other_ch"
+
 func (qc *QuarkClient) setDefaultAPIHeaders(req *http.Request) {
 	// 将 cookie map 转换为字符串格式
 	cookieParts := make([]string, 0, len(qc.cookies))
@@ -473,21 +484,15 @@ func (qc *QuarkClient) setDefaultAPIHeaders(req *http.Request) {
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Priority", "u=1, i")
 	req.Header.Set("Referer", "https://pan.quark.cn/list")
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"`)
-	req.Header.Set("Sec-Ch-Ua-Arch", `"x86"`)
-	req.Header.Set("Sec-Ch-Ua-Bitness", `"64"`)
-	req.Header.Set("Sec-Ch-Ua-Full-Version", `"142.0.7444.163"`)
-	req.Header.Set("Sec-Ch-Ua-Full-Version-List", `"Chromium";v="142.0.7444.163", "Google Chrome";v="142.0.7444.163", "Not_A Brand";v="99.0.0.0"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Model", `""`)
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-	req.Header.Set("Sec-Ch-Ua-Platform-Version", `"19.0.0"`)
-	req.Header.Set("Sec-Ch-Ua-Wow64", "?0")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", ClientUserAgent)
 	req.Header.Set("Origin", "https://pan.quark.cn")
+
+	// 不设置 Sec-Ch-Ua-* / Sec-Fetch-* 系列头。
+	//
+	// 这些是浏览器 Client Hints 头，服务端会用它们做一致性校验：
+	// 声明自己是 Chrome 142 却在 UA 里说自己是 Electron 100，自相矛盾，
+	// 反而更容易被判定为伪造 UA 而收紧策略。
+	// 桌面客户端本来也不发这些头，省掉更贴近真实客户端形态。
 
 	if req.Body != nil {
 		req.Header.Set("Content-Type", "application/json")

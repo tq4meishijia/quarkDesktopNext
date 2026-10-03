@@ -57,6 +57,9 @@ type App struct {
 	// watcher 是会话有效性后台探测器（见 session_watch.go）
 	watcher *sessionWatcher
 
+	// version 是构建时注入的版本号（见 main.go 的 var version）
+	version string
+
 	tm *transfer.Manager
 }
 
@@ -77,6 +80,30 @@ func New() *App {
 	// 必须在 Start 之后调用：恢复的任务会经 push 推给前端。
 	a.tm.RestoreTasks()
 	return a
+}
+
+// SetVersion 记录构建时注入的版本号，由 main 在 New() 之后调用。
+//
+// 放在 App 而非包级变量，是为了让前端也能读到（见 Version 方法），
+// 用户可在「关于」里看到自己装的是哪个版本。
+func (a *App) SetVersion(v string) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		v = "dev"
+	}
+	a.mu.Lock()
+	a.version = v
+	a.mu.Unlock()
+}
+
+// Version 返回当前版本号，供前端「关于」与日志使用。
+func (a *App) Version() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.version == "" {
+		return "dev"
+	}
+	return a.version
 }
 
 // Startup 在窗口创建后调用：按 环境变量 → 本地已保存会话 的顺序尝试自动登录。

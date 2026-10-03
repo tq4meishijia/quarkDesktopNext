@@ -222,12 +222,43 @@ jobs:
           fi
 
           # shellcheck disable=SC2086
-          wails build $TAGS -platform "${{ matrix.goos }}/${{ matrix.goarch }}" -trimpath -ldflags "-s -w" -o "$NAME"
+          wails build $TAGS -platform "${{ matrix.goos }}/${{ matrix.goarch }}" -trimpath -ldflags "-s -w -X main.version=${{ needs.version.outputs.version }}" -o "$NAME"
           ls -la build/bin/
 
       # ---------------------------------------------------------------
       # 产物整理 + 校验和
       #
+      # 版本号注入校验：-X 写错路径时 ldflags 会被**静默忽略**，构建照样成功，
+      # 只是产物里没有版本号（见 HANDOFF §6.3 第 14 项）。故在此显式核对。
+      # ---------------------------------------------------------------
+      - name: 校验版本号已注入
+        if: steps.compile.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECT="${{ needs.version.outputs.version }}"
+          echo "期望版本号: $EXPECT"
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            BIN="$(find build/bin -maxdepth 1 -name '*.app' -print -quit)/Contents/MacOS/*"
+          else
+            BIN="$(find build/bin -maxdepth 1 -type f ! -name '*.dSYM' -print -quit)"
+          fi
+          if [ -z "$BIN" ] || [ ! -e "$BIN" ]; then
+            echo "::error::未找到构建产物，无法校验版本号"; exit 1
+          fi
+          # 用 grep -a -c 计数而非 strings：runner 镜像不一定带 binutils；
+          # -a 把二进制当文本，-c 给出匹配行数，0 表示「产物里没有该版本号」。
+          # 实测：注入版命中 3 行，未注入版 0 行，可区分。
+          HITS="$(grep -a -c "$EXPECT" "$BIN" || true)"
+          if [ "${HITS:-0}" -gt 0 ]; then
+            echo "✅ 版本号已注入: $EXPECT（命中 $HITS 处）"
+          else
+            echo "::error::产物中未找到版本号 $EXPECT —— ldflags -X 可能写错了符号路径"
+            echo "  可执行文件: $BIN ($(wc -c < "$BIN") bytes)"
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
       # 两个平台差异（实测踩坑，勿轻易简化）：
       #   * Windows：wails 按 -o 的字面名字输出，不会自动补 .exe；
       #   * macOS：wails 忽略 -o 的文件名，产出的是 <outputfilename>.app 包目录，

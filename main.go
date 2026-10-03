@@ -25,11 +25,26 @@ import (
 //go:embed all:frontend
 var assets embed.FS
 
+// version 是应用版本号。
+//
+// 编译时由发布流水线用 ldflags 注入，例如：
+//
+//	-ldflags "-s -w -X main.version=1.7.2"
+//
+// 缺省为 "dev"，表示本地开发构建。
+//
+// 注入后可用于三处：窗口标题、关于页展示、以及 Go 侧日志。
+// **必须声明为可被 ldflags -X 寻址的包级字符串变量**，
+// 否则 -X 会被静默忽略（构建照常成功，但版本号永远为空）——
+// 本工程此前就踩过这个坑，见 HANDOFF §6.3 第 14 项。
+var version = "dev"
+
 func main() {
 	application := app.New()
+	application.SetVersion(version)
 
 	err := wails.Run(&options.App{
-		Title:     "夸克网盘桌面版",
+		Title:     "夸克网盘桌面版 " + version,
 		Width:     1240,
 		Height:    800,
 		MinWidth:  900,
